@@ -27,19 +27,24 @@ import java.io.Serializable;
 import java.util.Collection;
 
 /**
- * The {@code FileEnumerator}'s task is to discover all files to be read and to split them into a
- * set of {@link FileSourceSplit}.
- *
- * <p>This includes possibly, path traversals, file filtering (by name or other patterns) and
- * deciding whether to split files into multiple splits, and how to split them.
+ * {@code FileEnumerator} 的任务是发现所有要读取的文件，并将它们分割成一组 {@link FileSourceSplit}。
+ * <p>
+ * 这涵盖了可能的路径遍历、文件过滤（按名称或其他模式）以及决定是否将文件分割成多个分片，以及如何分割它们。
+ * </p>
  */
 @PublicEvolving
 public interface FileEnumerator {
 
     /**
-     * Generates all file splits for the relevant files under the given paths. The {@code
-     * minDesiredSplits} is an optional hint indicating how many splits would be necessary to
-     * exploit parallelism properly.
+     * 为给定路径下的相关文件生成所有文件分片。{@code minDesiredSplits} 是一个可选的提示，表示为了充分利用并行性所需生成的分片数量。
+     * <p>
+     * 该方法用于生成文件分片，它会根据给定的路径和所需的最小分片数生成一组文件分片，这些分片可用于后续的数据读取和处理。
+     * </p>
+     *
+     * @param paths 文件路径数组
+     * @param minDesiredSplits 所需的最小分片数
+     * @return 生成的文件分片集合
+     * @throws IOException 如果在生成分片时发生 I/O 错误
      */
     Collection<FileSourceSplit> enumerateSplits(Path[] paths, int minDesiredSplits)
             throws IOException;
@@ -47,8 +52,10 @@ public interface FileEnumerator {
     // ------------------------------------------------------------------------
 
     /**
-     * Factory for the {@code FileEnumerator}, to allow the {@code FileEnumerator} to be eagerly
-     * initialized and to not be serializable.
+     * 用于创建 {@code FileEnumerator} 的工厂接口，允许 {@code FileEnumerator} 在运行时被动态初始化，并且不需要被序列化。
+     * <p>
+     * 该接口允许实现类提供一种方式来创建 {@code FileEnumerator} 的实例，并且可以通过实现该接口来实现非序列化类的初始化。
+     * </p>
      */
     @FunctionalInterface
     interface Provider extends Serializable {

@@ -23,56 +23,45 @@ import org.apache.flink.table.connector.source.ScanTableSource;
 
 import java.util.List;
 
-/**
- * Pushes dynamic filter into {@link ScanTableSource}, the table source can filter the partitions
- * even the input data in runtime to reduce scan I/O.
- *
- * <p>Given the following SQL:
- *
- * <pre>{@code
- * SELECT * FROM partitioned_fact_table t1, non_partitioned_dim_table t2
- *   WHERE t1.part_key = t2.col1 AND t2.col2 = 100
- * }</pre>
- *
- * <p>In the example above, `partitioned_fact_table` is partition table whose partition key is
- * `part_key`, and `non_partitioned_dim_table` is a non-partition table which data contains all
- * partition values of `partitioned_fact_table`. With the filter {@code t2.col2 = 100}, only a small
- * part of the partitions need to be scanned out to do the join operation. The specific partitions
- * is not available in the optimization phase but in the execution phase.
- *
- * <p>Unlike {@link SupportsPartitionPushDown}, the conditions in the WHERE clause are analyzed to
- * determine in advance which partitions can be safely skipped in the optimization phase. For such
- * queries, the specific partitions is not available in the optimization phase but in the execution
- * phase.
- *
- * <p>By default, if this interface is not implemented, the data is read entirely with a subsequent
- * filter operation after the source.
- *
- * <p>If this interface is implemented, this interface just tells the source which fields can be
- * applied for filtering and the source needs to pick the fields that can be supported and return
- * them to planner. Then the planner will build the plan and construct the operator which will send
- * the data to the source in runtime.
- *
- * <p>In the future, more flexible filtering can be pushed into the source connectors through this
- * interface.
- */
 @PublicEvolving
 public interface SupportsDynamicFiltering {
 
     /**
-     * Return the filter fields this partition table source supported. This method is can tell the
-     * planner which fields can be used as dynamic filtering fields, the planner will pick some
-     * fields from the returned fields based on the query, and create dynamic filtering operator.
+     * 返回该分区表源支持的过滤字段列表。
+     * <p>
+     * 此方法告诉规划器哪些字段可以作为动态过滤字段使用，
+     * 规划器将根据查询从返回的字段中选择一些字段，并创建动态过滤操作符。
+     * <p>
+     * 例如，假设有一个查询：
+     *
+     * <pre>
+     * SELECT * FROM partitioned_fact_table t1, non_partitioned_dim_table t2
+     *   WHERE t1.part_key = t2.col1 AND t2.col2 = 100
+     * </pre>
+     *
+     * 在这个查询中，`partitioned_fact_table` 是一个分区表，其分区键为 `part_key`，
+     * 而 `non_partitioned_dim_table` 是一个非分区表，其数据包含 `partitioned_fact_table` 的所有分区值。
+     * 通过过滤条件 `t2.col2 = 100`，只有部分分区需要被扫描以进行连接操作。
+     * 具体需要扫描哪些分区在优化阶段是不可用的，而是在执行阶段才可用。
+     * <p>
+     * 如果没有实现此接口，数据源会先读取所有数据，然后再进行过滤操作。
+     * 如果实现了此接口，那么源需要告知规划器它支持哪些过滤字段，规划器会根据查询选择合适的字段，
+     * 并在执行时通过动态过滤操作符将数据发送到源。
+     * <p>
+     * 未来，可以通过这个接口将更灵活的过滤条件推入源连接器中。
+     *
+     * @return 支持的过滤字段列表
      */
     List<String> listAcceptedFilterFields();
 
     /**
-     * Applies the candidate filter fields into the table source. The data corresponding the filter
-     * fields will be provided in runtime, which can be used to filter the partitions or the input
-     * data.
+     * 将候选过滤字段应用到表源中。
+     * <p>
+     * 在运行时，与过滤字段对应的数据将被提供，可以用于过滤分区或输入数据。
+     * <p>
+     * <b>注意：</b> 候选过滤字段始终来自 {@link #listAcceptedFilterFields()} 的返回结果。
      *
-     * <p>NOTE: the candidate filter fields are always from the result of {@link
-     * #listAcceptedFilterFields()}.
+     * @param candidateFilterFields 候选过滤字段列表
      */
     void applyDynamicFiltering(List<String> candidateFilterFields);
 }

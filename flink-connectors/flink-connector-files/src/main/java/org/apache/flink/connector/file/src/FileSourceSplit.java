@@ -35,71 +35,64 @@ import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * A {@link SourceSplit} that represents a file, or a region of a file.
- *
- * <p>The split has an offset and an end, which defines the region of the file represented by the
- * split. For splits representing the while file, the offset is zero and the length is the file
- * size.
- *
- * <p>The split may furthermore have a "reader position", which is the checkpointed position from a
- * reader previously reading this split. This position is typically null when the split is assigned
- * from the enumerator to the readers, and is non-null when the readers checkpoint their state in a
- * file source split.
- *
- * <p>This class is {@link Serializable} for convenience. For Flink's internal serialization (both
- * for RPC and for checkpoints), the {@link FileSourceSplitSerializer} is used.
+ * 一个 {@link SourceSplit}，表示一个文件或文件的一部分。
+ * <p>
+ * 分片具有一个偏移量和结束位置，定义了分片所表示的文件区域。对于表示整个文件的分片，偏移量为零，长度为文件大小。
+ * <p>
+ * 分片还可能具有一个“读取器位置”，这是之前读取此分片的读取器的检查点位置。当分片从枚举器分配给读取器时，此位置通常为 null，而当读取器在文件源分片中检查点其状态时，此位置则为非 null。
+ * <p>
+ * 该类是 {@link Serializable}，以便于使用。对于 Flink 的内部序列化（无论是用于 RPC 还是检查点），使用 {@link FileSourceSplitSerializer}。
  */
 @PublicEvolving
 public class FileSourceSplit implements SourceSplit, Serializable {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L; // 序列化版本号
 
-    private static final String[] NO_HOSTS = StringUtils.EMPTY_STRING_ARRAY;
+    private static final String[] NO_HOSTS = StringUtils.EMPTY_STRING_ARRAY; // 默认无主机信息
 
-    /** The unique ID of the split. Unique within the scope of this source. */
+    /** 分片的唯一 ID，在此数据源范围内唯一。 */
     private final String id;
 
-    /** The path of the file referenced by this split. */
+    /** 该分片引用的文件路径。 */
     private final Path filePath;
 
-    /** The position of the first byte in the file to process. */
+    /** 文件中要处理的第一个字节的位置（包含）。 */
     private final long offset;
 
-    /** The number of bytes in the file to process. */
+    /** 要处理的字节数（从偏移量开始）。 */
     private final long length;
 
-    /** The modification time of the file, from {@link FileStatus#getModificationTime()}. */
+    /** 文件的修改时间，来自 {@link FileStatus#getModificationTime()}。 */
     private final long fileModificationTime;
 
-    /** The file size in bytes, from {@link FileStatus#getLen()}. */
+    /** 文件大小（字节），来自 {@link FileStatus#getLen()}。 */
     private final long fileSize;
 
     /**
-     * The names of the hosts storing this range of the file. Empty, if no host information is
-     * available.
+     * 存储此文件范围的主机名。如果没有主机信息，则为空。
      */
     private final String[] hostnames;
 
-    /** The precise reader position in the split, to resume from. */
+    /** 读取器在分片中的精确位置，用于从中断点恢复。 */
     @Nullable private final CheckpointedPosition readerPosition;
 
     /**
-     * The splits are frequently serialized into checkpoints. Caching the byte representation makes
-     * repeated serialization cheap. This field is used by {@link FileSourceSplitSerializer}.
+     * 分片经常被序列化到检查点中。缓存字节表示形式可以使重复序列化变得高效。
+     * 该字段由 {@link FileSourceSplitSerializer} 使用。
      */
     @Nullable transient byte[] serializedFormCache;
 
     // --------------------------------------------------------------------------------------------
 
     /**
-     * Constructs a split with host information.
+     * 构造一个带有主机信息的分片。
      *
-     * @param id The unique ID of this source split.
-     * @param filePath The path to the file.
-     * @param offset The start (inclusive) of the split's rage in the file.
-     * @param length The number of bytes in the split (starting from the offset)
-     * @param fileModificationTime The modification time of the file
-     * @param fileSize The size of the full file
+     * @param id 此源分片的唯一 ID。
+     * @param filePath 文件路径。
+     * @param offset 分片在文件中的起始位置（包含）。
+     * @param length 分片中的字节数（从偏移量开始）。
+     * @param fileModificationTime 文件的修改时间。
+     * @param fileSize 文件的总大小。
      */
     public FileSourceSplit(
             String id,
@@ -112,14 +105,15 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     /**
-     * Constructs a split with host information.
+     * 构造一个带有主机信息的分片。
      *
-     * @param filePath The path to the file.
-     * @param offset The start (inclusive) of the split's rage in the file.
-     * @param length The number of bytes in the split (starting from the offset)
-     * @param fileModificationTime The modification time of the file
-     * @param fileSize The size of the full file
-     * @param hostnames The hostnames of the nodes storing the split's file range.
+     * @param id 此源分片的唯一 ID。
+     * @param filePath 文件路径。
+     * @param offset 分片在文件中的起始位置（包含）。
+     * @param length 分片中的字节数（从偏移量开始）。
+     * @param fileModificationTime 文件的修改时间。
+     * @param fileSize 文件的总大小。
+     * @param hostnames 存储此分片文件范围的主机名。
      */
     public FileSourceSplit(
             String id,
@@ -133,14 +127,16 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     /**
-     * Constructs a split with host information.
+     * 构造一个带有主机信息的分片。
      *
-     * @param filePath The path to the file.
-     * @param offset The start (inclusive) of the split's rage in the file.
-     * @param length The number of bytes in the split (starting from the offset)
-     * @param fileModificationTime The modification time of the file
-     * @param fileSize The size of the full file
-     * @param hostnames The hostnames of the nodes storing the split's file range.
+     * @param id 此源分片的唯一 ID。
+     * @param filePath 文件路径。
+     * @param offset 分片在文件中的起始位置（包含）。
+     * @param length 分片中的字节数（从偏移量开始）。
+     * @param fileModificationTime 文件的修改时间。
+     * @param fileSize 文件的总大小。
+     * @param hostnames 存储此分片文件范围的主机名。
+     * @param readerPosition 读取器的位置（可选）。
      */
     public FileSourceSplit(
             String id,
@@ -163,15 +159,16 @@ public class FileSourceSplit implements SourceSplit, Serializable {
                 null);
     }
 
-    /** @deprecated You should use {@link #FileSourceSplit(String, Path, long, long, long, long)} */
+    /**
+     * @deprecated 请使用 {@link #FileSourceSplit(String, Path, long, long, long, long)}。
+     */
     @Deprecated
     public FileSourceSplit(String id, Path filePath, long offset, long length) {
         this(id, filePath, offset, length, 0, 0, NO_HOSTS);
     }
 
     /**
-     * @deprecated You should use {@link #FileSourceSplit(String, Path, long, long, long, long,
-     *     String...)}
+     * @deprecated 请使用 {@link #FileSourceSplit(String, Path, long, long, long, long, String...)}。
      */
     @Deprecated
     public FileSourceSplit(
@@ -180,8 +177,7 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     /**
-     * @deprecated You should use {@link #FileSourceSplit(String, Path, long, long, long, long,
-     *     String[], CheckpointedPosition)}
+     * @deprecated 请使用 {@link #FileSourceSplit(String, Path, long, long, long, long, String[], CheckpointedPosition)}。
      */
     @Deprecated
     public FileSourceSplit(
@@ -195,7 +191,7 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     /**
-     * Package private constructor, used by the serializers to directly cache the serialized form.
+     * 包级私有构造函数，用于序列化器直接缓存序列化形式。
      */
     FileSourceSplit(
             String id,
@@ -210,83 +206,76 @@ public class FileSourceSplit implements SourceSplit, Serializable {
         this.fileModificationTime = fileModificationTime;
         this.fileSize = fileSize;
 
-        checkArgument(offset >= 0, "offset must be >= 0");
-        checkArgument(length >= 0, "length must be >= 0");
-        checkNoNullHosts(hostnames);
+        checkArgument(offset >= 0, "offset must be >= 0"); // 检查偏移量是否合法
+        checkArgument(length >= 0, "length must be >= 0"); // 检查长度是否合法
+        checkNoNullHosts(hostnames); // 检查主机名数组是否合法
 
-        this.id = checkNotNull(id);
-        this.filePath = checkNotNull(filePath);
+        this.id = checkNotNull(id); // 确保 ID 不为 null
+        this.filePath = checkNotNull(filePath); // 确保文件路径不为 null
         this.offset = offset;
         this.length = length;
         this.hostnames = hostnames;
         this.readerPosition = readerPosition;
-        this.serializedFormCache = serializedForm;
+        this.serializedFormCache = serializedForm; // 缓存序列化形式
     }
 
     // ------------------------------------------------------------------------
-    //  split properties
+    // 分片属性
     // ------------------------------------------------------------------------
 
     @Override
     public String splitId() {
-        return id;
+        return id; // 返回分片的唯一 ID
     }
 
-    /** Gets the file's path. */
+    /** 获取文件路径。 */
     public Path path() {
         return filePath;
     }
 
     /**
-     * Returns the start of the file region referenced by this source split. The position is
-     * inclusive, the value indicates the first byte that is part of the split.
+     * 返回此源分片引用的文件区域的起始位置。该位置是包含的，表示分片的第一个字节。
      */
     public long offset() {
         return offset;
     }
 
-    /** Returns the number of bytes in the file region described by this source split. */
+    /** 返回此源分片描述的文件区域中的字节数。 */
     public long length() {
         return length;
     }
 
-    /** Returns the modification time of the file, from {@link FileStatus#getModificationTime()}. */
+    /** 返回文件的修改时间，来自 {@link FileStatus#getModificationTime()}。 */
     public long fileModificationTime() {
         return fileModificationTime;
     }
 
-    /** Returns the full file size in bytes, from {@link FileStatus#getLen()}. */
+    /** 返回文件的总大小（字节），来自 {@link FileStatus#getLen()}。 */
     public long fileSize() {
         return fileSize;
     }
 
     /**
-     * Gets the hostnames of the nodes storing the file range described by this split. The returned
-     * array is empty, if no host information is available.
-     *
-     * <p>Host information is typically only available on specific file systems, like HDFS.
+     * 获取存储此分片文件范围的主机名。如果没有主机信息，则返回空数组。
+     * <p>
+     * 主机信息通常仅在特定文件系统（如 HDFS）中可用。
      */
     public String[] hostnames() {
         return hostnames;
     }
 
     /**
-     * Gets the (checkpointed) position of the reader, if set. This value is typically absent for
-     * splits when assigned from the enumerator to the readers, and present when the splits are
-     * recovered from a checkpoint.
+     * 获取读取器的（检查点）位置（如果有）。此值通常在分片从枚举器分配给读取器时不存在，而在从检查点恢复分片时存在。
      */
     public Optional<CheckpointedPosition> getReaderPosition() {
         return Optional.ofNullable(readerPosition);
     }
 
     /**
-     * Creates a copy of this split where the checkpointed position is replaced by the given new
-     * position.
-     *
-     * <p><b>IMPORTANT:</b> Subclasses that add additional information to the split must override
-     * this method to return that subclass type. This contract is enforced by checks in the file
-     * source implementation. We did not try to enforce this contract via generics in this split
-     * class, because it leads to very ugly and verbose use of generics.
+     * 创建此分片的一个副本，其中检查点位置被给定的新位置替换。
+     * <p>
+     * <b>重要：</b> 添加额外信息到分片的子类必须重写此方法以返回该子类类型。
+     * 这是文件源实现中的强制性要求。我们没有通过泛型强制执行此契约，因为这会导致泛型的使用变得非常复杂。
      */
     public FileSourceSplit updateWithCheckpointedPosition(@Nullable CheckpointedPosition position) {
         return new FileSourceSplit(
@@ -294,7 +283,7 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     // ------------------------------------------------------------------------
-    //  utils
+    // 工具方法
     // ------------------------------------------------------------------------
 
     @Override
@@ -307,9 +296,9 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     private static void checkNoNullHosts(String[] hosts) {
-        checkNotNull(hosts, "hostnames array must not be null");
+        checkNotNull(hosts, "hostnames array must not be null"); // 检查主机名数组不为 null
         for (String host : hosts) {
-            checkArgument(host != null, "the hostnames must not contain null entries");
+            checkArgument(host != null, "the hostnames must not contain null entries"); // 检查主机名数组中没有 null 元素
         }
     }
 }

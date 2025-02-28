@@ -24,23 +24,18 @@ import org.apache.flink.annotation.PublicEvolving;
 import java.util.Optional;
 
 /**
- * Sources that implement this interface delay checkpoints when receiving a trigger message from the
- * checkpoint coordinator to the point when their input data/events indicate that a checkpoint
- * should be triggered.
+ * 实现此接口的源读取器会在从检查点协调器收到触发消息时延迟检查点，直到其输入数据/事件表明应触发检查点。
+ * <p>
+ * {@link #shouldTriggerCheckpoint()} 被调用时，{@link ExternallyInducedSourceReader} 告诉 Flink 运行时需要进行检查点。
+ * <p>
+ * 通常情况下，这类源读取器会与 {@link SplitEnumerator} 一起工作，由其通知外部系统触发检查点。
+ * 外部系统还需要将 Checkpoint ID 转发给源读取器，以便源读取器知道需要触发哪个检查点。
+ * <p>
+ * <b>重要：</b> 所有并行源任务必须大致在同一时间触发检查点。
+ * 否则，由于长时间的检查点对齐阶段或大型对齐数据快照，会导致性能问题。
  *
- * <p>The ExternallyInducedSourceReader tells the Flink runtime that a checkpoint needs to be made
- * by returning a checkpointId when {@link #shouldTriggerCheckpoint()} is invoked.
- *
- * <p>The implementations typically works together with the {@link SplitEnumerator} which informs
- * the external system to trigger a checkpoint. The external system also needs to forward the
- * Checkpoint ID to the source, so the source knows which checkpoint to trigger.
- *
- * <p><b>Important:</b> It is crucial that all parallel source tasks trigger their checkpoints at
- * roughly the same time. Otherwise this leads to performance issues due to long checkpoint
- * alignment phases or large alignment data snapshots.
- *
- * @param <T> The type of records produced by the source.
- * @param <SplitT> The type of splits handled by the source.
+ * @param <T>        源读取器产生的记录类型。
+ * @param <SplitT>   源读取器处理的分片类型。
  */
 @Experimental
 @PublicEvolving
@@ -48,17 +43,15 @@ public interface ExternallyInducedSourceReader<T, SplitT extends SourceSplit>
         extends SourceReader<T, SplitT> {
 
     /**
-     * A method that informs the Flink runtime whether a checkpoint should be triggered on this
-     * Source.
+     * 一个方法，用于告知 Flink 运行时是否需要在此源上触发检查点。
+     * <p>
+     * 当之前的 {@link #pollNext(ReaderOutput)} 返回 {@link org.apache.flink.core.io.InputStatus#NOTHING_AVAILABLE} 时，
+     * 会调用此方法，以检查源是否需要进行检查点。
+     * <p>
+     * 如果返回 CheckpointId，则 Flink 运行时将在该源读取器上触发检查点。
+     * 否则，Flink 运行时将继续处理记录。
      *
-     * <p>This method is invoked when the previous {@link #pollNext(ReaderOutput)} returns {@link
-     * org.apache.flink.core.io.InputStatus#NOTHING_AVAILABLE}, to check if the source needs to be
-     * checkpointed.
-     *
-     * <p>If a CheckpointId is returned, a checkpoint will be triggered on this source reader.
-     * Otherwise, Flink runtime will continue to process the records.
-     *
-     * @return An optional checkpoint ID that Flink runtime should take a checkpoint for.
+     * @return Flink 运行时应为其触发检查点的可选 Checkpoint ID。
      */
     Optional<Long> shouldTriggerCheckpoint();
 }

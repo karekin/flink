@@ -28,40 +28,56 @@ import java.util.Collection;
 import java.util.Optional;
 
 /**
- * The {@code FileSplitAssigner} is responsible for deciding what split should be processed next by
- * which node. It determines split processing order and locality.
+ * {@code FileSplitAssigner} 负责决定哪些分片应由哪个节点处理。它决定了分片的处理顺序和本地性。
+ * <p>
+ * 该接口的主要作用是管理文件分片的分配逻辑，确保分片能够被正确地分配给各个处理节点，并且处理顺序和本地性符合预期。
  */
 @PublicEvolving
 public interface FileSplitAssigner {
 
     /**
-     * Gets the next split.
+     * 获取下一个分片。
+     * <p>
+     * 当此方法返回一个空的 {@code Optional} 时，表示分片集已经分配完毕，源将在读者完成当前分片后结束。
      *
-     * <p>When this method returns an empty {@code Optional}, then the set of splits is assumed to
-     * be done and the source will finish once the readers finished their current splits.
+     * @param hostname 节点的主机名，用于确定分片的本地性（可选参数）
+     * @return 下一个分片（如果有的话）
      */
     Optional<FileSourceSplit> getNext(@Nullable String hostname);
 
     /**
-     * Adds a set of splits to this assigner. This happens for example when some split processing
-     * failed and the splits need to be re-added, or when new splits got discovered.
+     * 向分配器中添加一组分片。这通常发生在分片处理失败需要重新添加时，或者发现了新的分片。
+     * <p>
+     * 这个方法允许动态地将新的分片添加到分配器中，以便它们可以被后续的分配操作处理。
+     *
+     * @param splits 要添加的分片集合
      */
     void addSplits(Collection<FileSourceSplit> splits);
 
-    /** Gets the remaining splits that this assigner has pending. */
+    /**
+     * 获取分配器中剩余的分片。
+     * <p>
+     * 该方法返回分配器中尚未分配的所有分片，可以通过此集合了解当前还有哪些分片需要处理。
+     *
+     * @return 分配器中剩余的分片集合
+     */
     Collection<FileSourceSplit> remainingSplits();
 
     // ------------------------------------------------------------------------
 
     /**
-     * Factory for the {@code FileSplitAssigner}, to allow the {@code FileSplitAssigner} to be
-     * eagerly initialized and to not be serializable.
+     * 创建 {@code FileSplitAssigner} 的工厂接口，允许 {@code FileSplitAssigner} 在运行时动态初始化，并且不需要被序列化。
+     * <p>
+     * 该接口定义了一个创建分配器实例的方法，可以根据初始分片集创建分配器。
      */
     @FunctionalInterface
     interface Provider extends Serializable {
 
         /**
-         * Creates a new {@code FileSplitAssigner} that starts with the given set of initial splits.
+         * 创建一个新的 {@code FileSplitAssigner}，初始时带有给定的分片集。
+         *
+         * @param initialSplits 初始分片集
+         * @return 新创建的 {@code FileSplitAssigner} 实例
          */
         FileSplitAssigner create(Collection<FileSourceSplit> initialSplits);
     }
