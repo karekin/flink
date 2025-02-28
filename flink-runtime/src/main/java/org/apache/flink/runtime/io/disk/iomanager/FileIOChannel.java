@@ -27,59 +27,54 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * A Channel represents a collection of files that belong logically to the same resource. An example
- * is a collection of files that contain sorted runs of data from the same stream, that will later
- * on be merged together.
+ * FileIOChannel表示逻辑上属于同一资源的一组文件。例如，包含来自同一数据流的已排序数据块的文件集合，这些数据块稍后将被一起合并。
  */
 public interface FileIOChannel {
 
     /**
-     * Gets the channel ID of this I/O channel.
+     * 获取此I/O通道的通道ID。
      *
-     * @return The channel ID.
+     * @return 通道ID。
      */
     ID getChannelID();
 
-    /** Gets the size (in bytes) of the file underlying the channel. */
+    /** 获取底层文件的大小（以字节为单位）。 */
     long getSize() throws IOException;
 
     /**
-     * Checks whether the channel has been closed.
+     * 检查通道是否已关闭。
      *
-     * @return True if the channel has been closed, false otherwise.
+     * @return 如果通道已关闭，则返回true；否则返回false。
      */
     boolean isClosed();
 
     /**
-     * Closes the channel. For asynchronous implementations, this method waits until all pending
-     * requests are handled. Even if an exception interrupts the closing, the underlying
-     * <tt>FileChannel</tt> is closed.
+     * 关闭通道。对于异步实现，此方法会等待所有待处理的请求完成。即使异常中断了关闭过程，底层的 FileChannel 也会关闭。
      *
-     * @throws IOException Thrown, if an error occurred while waiting for pending requests.
+     * @throws IOException 如果在等待待处理请求时发生错误。
      */
     void close() throws IOException;
 
     /**
-     * Deletes the file underlying this I/O channel.
+     * 删除底层文件。
      *
-     * @throws IllegalStateException Thrown, when the channel is still open.
+     * @throws IllegalStateException 如果通道仍然打开。
      */
     void deleteChannel();
 
     FileChannel getNioFileChannel();
 
     /**
-     * Closes the channel and deletes the underlying file. For asynchronous implementations, this
-     * method waits until all pending requests are handled.
+     * 关闭通道并删除底层文件。对于异步实现，此方法会等待所有待处理的请求完成。
      *
-     * @throws IOException Thrown, if an error occurred while waiting for pending requests.
+     * @throws IOException 如果在等待待处理请求时发生错误。
      */
     void closeAndDelete() throws IOException;
 
-    // --------------------------------------------------------------------------------------------
-    // --------------------------------------------------------------------------------------------
+    // ----------------------------------------------------------------------------------------
+    // ----------------------------------------------------------------------------------------
 
-    /** An ID identifying an underlying file channel. */
+    /** 用于标识底层文件通道的ID。 */
     class ID {
 
         private static final int RANDOM_BYTES_LENGTH = 16;
@@ -98,12 +93,12 @@ public interface FileIOChannel {
             this.threadNum = threadNum;
         }
 
-        /** Returns the path to the underlying temporary file. */
+        /** 返回底层临时文件的路径。 */
         public String getPath() {
             return path.getAbsolutePath();
         }
 
-        /** Returns the path to the underlying temporary file as a File. */
+        /** 返回底层临时文件的路径作为File对象。 */
         public File getPathFile() {
             return path;
         }
@@ -139,7 +134,7 @@ public interface FileIOChannel {
         }
     }
 
-    /** An enumerator for channels that logically belong together. */
+    /** 用于枚举逻辑上属于一组的通道。 */
     final class Enumerator {
 
         private static AtomicInteger globalCounter = new AtomicInteger();
@@ -157,9 +152,7 @@ public interface FileIOChannel {
         }
 
         public ID next() {
-            // The local counter is used to increment file names while the global counter is used
-            // for indexing the directory and associated read and write threads. This performs a
-            // round-robin among all spilling operators and avoids I/O bunching.
+            // 本地计数器用于递增文件名，而全局计数器用于索引目录和关联的读写线程。这在所有溢出操作符之间进行循环操作，避免I/O堆积。
             int threadNum = globalCounter.getAndIncrement() % paths.length;
             String filename = String.format("%s.%06d.channel", namePrefix, (localCounter++));
             return new ID(new File(paths[threadNum], filename), threadNum);
