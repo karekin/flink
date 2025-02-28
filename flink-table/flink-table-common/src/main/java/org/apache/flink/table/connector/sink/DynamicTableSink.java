@@ -38,191 +38,170 @@ import java.io.Serializable;
 import java.util.Optional;
 
 /**
- * Sink of a dynamic table to an external storage system.
+ * 动态表（Dynamic Table）的外部存储系统的 Sink。
  *
- * <p>Dynamic tables are the core concept of Flink's Table & SQL API for processing both bounded and
- * unbounded data in a unified fashion. By definition, a dynamic table can change over time.
+ * <p>动态表是 Flink Table & SQL API 的核心概念之一，用于统一处理有界（bounded）和无界（unbounded）数据。
+ * 动态表可以随着时间的推移发生变化。
  *
- * <p>When writing a dynamic table, the content can always be considered as a changelog (finite or
- * infinite) for which all changes are written out continuously until the changelog is exhausted.
- * The given {@link ChangelogMode} indicates the set of changes that the sink accepts during
- * runtime.
+ * <p>当写入动态表时，其内容可以被视为一个变更日志（changelog），该日志可能是有限的也可能是无限的，
+ * 并且所有更改都会被持续写入，直到变更日志耗尽。
+ * 指定的 {@link ChangelogMode} 表示 Sink 在运行时接受的变更类型。
  *
- * <p>For regular batch scenarios, the sink can solely accept insert-only rows and write out bounded
- * streams.
+ * <p>对于常规的批处理（batch）场景，Sink 仅接受插入（insert-only）行，并写入有界流。
  *
- * <p>For regular streaming scenarios, the sink can solely accept insert-only rows and can write out
- * unbounded streams.
+ * <p>对于常规的流处理（streaming）场景，Sink 仅接受插入（insert-only）行，并写入无界流。
  *
- * <p>For change data capture (CDC) scenarios, the sink can write out bounded or unbounded streams
- * with insert, update, and delete rows. See also {@link RowKind}.
+ * <p>对于变更数据捕获（CDC）场景，Sink 可以写入有界或无界流，并且可以包含插入、更新和删除行，
+ * 详情见 {@link RowKind}。
  *
- * <p>Instances of {@link DynamicTableSink} can be seen as factories that eventually produce
- * concrete runtime implementation for writing the actual data.
+ * <p>{@link DynamicTableSink} 的实例可以被视为工厂，它们最终会创建实际用于写入数据的运行时实现。
  *
- * <p>Depending on the optionally declared abilities, the planner might apply changes to an instance
- * and thus mutate the produced runtime implementation.
+ * <p>根据声明的可选能力，优化器可能会对实例进行更改，从而影响生成的运行时实现。
  *
- * <p>A {@link DynamicTableSink} can implement the following abilities:
- *
+ * <p>{@link DynamicTableSink} 可以实现以下能力：
  * <ul>
- *   <li>{@link SupportsPartitioning}
- *   <li>{@link SupportsOverwrite}
- *   <li>{@link SupportsWritingMetadata}
+ *   <li>{@link SupportsPartitioning} - 支持分区写入</li>
+ *   <li>{@link SupportsOverwrite} - 支持数据覆盖</li>
+ *   <li>{@link SupportsWritingMetadata} - 支持写入元数据</li>
  * </ul>
  *
- * <p>In the last step, the planner will call {@link #getSinkRuntimeProvider(Context)} for obtaining
- * a provider of runtime implementation.
+ * <p>在最后一步，优化器会调用 {@link #getSinkRuntimeProvider(Context)} 来获取运行时提供程序。
  */
 @PublicEvolving
 public interface DynamicTableSink {
 
     /**
-     * Returns the set of changes that the sink accepts during runtime.
+     * 返回 Sink 在运行时可以接受的变更集。
      *
-     * <p>The planner can make suggestions but the sink has the final decision what it requires. If
-     * the planner does not support this mode, it will throw an error. For example, the sink can
-     * return that it only supports {@link ChangelogMode#insertOnly()}.
+     * <p>优化器可以提供建议，但最终由 Sink 决定接受哪些变更。
+     * 如果优化器不支持某种模式，则会抛出错误。例如，Sink 可能仅支持 {@link ChangelogMode#insertOnly()}。
      *
-     * @param requestedMode expected set of changes by the current plan
+     * @param requestedMode 当前计划期望的变更模式
      */
     ChangelogMode getChangelogMode(ChangelogMode requestedMode);
 
     /**
-     * Returns a provider of runtime implementation for writing the data.
+     * 返回用于写入数据的运行时实现提供程序。
      *
-     * <p>There might exist different interfaces for runtime implementation which is why {@link
-     * SinkRuntimeProvider} serves as the base interface. Concrete {@link SinkRuntimeProvider}
-     * interfaces might be located in other Flink modules.
+     * <p>由于可能存在不同的运行时接口，因此 {@link SinkRuntimeProvider} 作为基础接口。
+     * 具体的 {@link SinkRuntimeProvider} 可能位于其他 Flink 模块中。
      *
-     * <p>Independent of the provider interface, the table runtime expects that a sink
-     * implementation accepts internal data structures (see {@link RowData} for more information).
+     * <p>无论使用哪种提供程序接口，表运行时都期望 Sink 实现能够接受内部数据结构（详见 {@link RowData}）。
      *
-     * <p>The given {@link Context} offers utilities by the planner for creating runtime
-     * implementation with minimal dependencies to internal data structures.
+     * <p>提供的 {@link Context} 提供了一些实用工具，使得运行时实现的创建可以尽可能减少对内部数据结构的依赖。
      *
-     * <p>{@link SinkV2Provider} is the recommended core interface. {@link SinkProvider}, {@code
-     * SinkFunctionProvider} in {@code flink-table-api-java-bridge} and {@link OutputFormatProvider}
-     * are available for backwards compatibility.
+     * <p>{@link SinkV2Provider} 是推荐的核心接口。
+     * {@link SinkProvider}、{@code SinkFunctionProvider}（位于 `flink-table-api-java-bridge`）
+     * 和 {@link OutputFormatProvider} 主要用于向后兼容。
      *
+     * @param context 运行时上下文
+     * @return 运行时提供程序实例
      * @see SinkV2Provider
      */
     SinkRuntimeProvider getSinkRuntimeProvider(Context context);
 
     /**
-     * Creates a copy of this instance during planning. The copy should be a deep copy of all
-     * mutable members.
+     * 在优化器规划阶段创建此实例的副本。
+     * 副本应该是所有可变成员的深拷贝。
+     *
+     * @return 此 Sink 实例的副本
      */
     DynamicTableSink copy();
 
-    /** Returns a string that summarizes this sink for printing to a console or log. */
+    /**
+     * 返回一个用于打印到控制台或日志的摘要字符串。
+     *
+     * @return Sink 的描述信息
+     */
     String asSummaryString();
 
     // --------------------------------------------------------------------------------------------
-    // Helper interfaces
+    // 辅助接口
     // --------------------------------------------------------------------------------------------
 
     /**
-     * Context for creating runtime implementation via a {@link SinkRuntimeProvider}.
+     * 运行时提供程序的创建上下文。
      *
-     * <p>It offers utilities by the planner for creating runtime implementation with minimal
-     * dependencies to internal data structures.
+     * <p>它提供了一些实用工具，使得运行时实现的创建可以尽可能减少对内部数据结构的依赖。
      *
-     * <p>Methods should be called in {@link #getSinkRuntimeProvider(Context)}. The returned
-     * instances are {@link Serializable} and can be directly passed into the runtime implementation
-     * class.
+     * <p>方法应在 {@link #getSinkRuntimeProvider(Context)} 中调用。
+     * 返回的实例应实现 {@link Serializable}，并可直接传递到运行时实现类中。
      */
     @PublicEvolving
     interface Context {
 
         /**
-         * Returns whether a runtime implementation can expect a finite number of rows.
+         * 返回运行时实现是否可以期望行数是有限的。
          *
-         * <p>This information might be derived from the session's execution mode and/or kind of
-         * query.
+         * <p>此信息可能来源于会话的执行模式或查询的类型。
+         *
+         * @return 是否为有界流
          */
         boolean isBounded();
 
         /**
-         * Creates type information describing the internal data structures of the given {@link
-         * DataType}.
+         * 创建描述内部数据结构的类型信息。
          *
+         * @param consumedDataType 被消费的数据类型
+         * @return 对应的类型信息
          * @see ResolvedSchema#toPhysicalRowDataType()
          */
         <T> TypeInformation<T> createTypeInformation(DataType consumedDataType);
 
         /**
-         * Creates type information describing the internal data structures of the given {@link
-         * LogicalType}.
+         * 创建描述内部数据结构的类型信息（基于 {@link LogicalType}）。
+         *
+         * @param consumedLogicalType 被消费的逻辑类型
+         * @return 对应的类型信息
          */
         <T> TypeInformation<T> createTypeInformation(LogicalType consumedLogicalType);
 
         /**
-         * Creates a converter for mapping between Flink's internal data structures and objects
-         * specified by the given {@link DataType} that can be passed into a runtime implementation.
+         * 创建一个转换器，将 Flink 内部数据结构转换为可传递到运行时实现的对象。
          *
-         * <p>For example, {@link RowData} and its fields can be converted into a {@link Row}, or
-         * the internal representation for structured types can be converted back into the original
-         * (possibly nested) POJO.
+         * <p>例如，{@link RowData} 可以转换为 {@link Row}，
+         * 或者结构化类型的内部表示可以转换回原始（可能是嵌套的）POJO。
          *
+         * @param consumedDataType 被消费的数据类型
+         * @return 数据结构转换器
          * @see LogicalType#supportsOutputConversion(Class)
          */
         DataStructureConverter createDataStructureConverter(DataType consumedDataType);
-
-        /**
-         * Returns an {@link Optional} array of column index paths related to user specified target
-         * column list or {@link Optional#empty()} when not specified. The array indices are 0-based
-         * and support composite columns within (possibly nested) structures.
-         *
-         * <p>This information comes from the column list of the DML clause, e.g., for a sink table
-         * t1 which schema is: {@code a STRING, b ROW < b1 INT, b2 STRING>, c BIGINT}
-         *
-         * <ul>
-         *   <li>insert: 'insert into t1(a, b.b2) ...', the column list will be 'a, b.b2', and will
-         *       return {@code [[0], [1, 1]]}. The statement 'insert into t1 select ...' without
-         *       specifying a column list will return {@link Optional#empty()}.
-         *   <li>update: 'update t1 set a=1, b.b1=2 where ...', the column list will be 'a, b.b1',
-         *       and will return {@code [[0], [1, 0]]}.
-         * </ul>
-         *
-         * <p>Note: will always return empty for the delete statement because it has no column list.
-         */
-        Optional<int[][]> getTargetColumns();
     }
 
     /**
-     * Converter for mapping between Flink's internal data structures and objects specified by the
-     * given {@link DataType} that can be passed into a runtime implementation.
+     * 数据结构转换器，用于在 Flink 内部数据结构和外部对象之间进行映射。
      *
-     * <p>For example, {@link RowData} and its fields can be converted into a {@link Row}, or the
-     * internal representation for structured types can be converted back into the original
-     * (possibly nested) POJO.
+     * <p>例如，{@link RowData} 可以转换为 {@link Row}，
+     * 或者结构化类型的内部表示可以转换回原始（可能是嵌套的）POJO。
      *
      * @see LogicalType#supportsOutputConversion(Class)
      */
     @PublicEvolving
     interface DataStructureConverter extends RuntimeConverter {
 
-        /** Converts the given internal structure into an external object. */
+        /**
+         * 将内部结构转换为外部对象。
+         *
+         * @param internalStructure 内部数据结构
+         * @return 转换后的外部对象
+         */
         @Nullable
         Object toExternal(@Nullable Object internalStructure);
     }
 
     /**
-     * Provides actual runtime implementation for writing the data.
+     * 提供实际的运行时实现，用于写入数据。
      *
-     * <p>There might exist different interfaces for runtime implementation which is why {@link
-     * SinkRuntimeProvider} serves as the base interface. Concrete {@link SinkRuntimeProvider}
-     * interfaces might be located in other Flink modules.
-     *
-     * <p>{@link SinkV2Provider} is the recommended core interface. {@link SinkProvider}, {@code
-     * SinkFunctionProvider} in {@code flink-table-api-java-bridge} and {@link OutputFormatProvider}
-     * are available for backwards compatibility.
+     * <p>{@link SinkV2Provider} 是推荐的核心接口。
+     * {@link SinkProvider}、{@code SinkFunctionProvider}（位于 `flink-table-api-java-bridge`）
+     * 和 {@link OutputFormatProvider} 主要用于向后兼容。
      *
      * @see SinkV2Provider
      */
     @PublicEvolving
     interface SinkRuntimeProvider {
-        // marker interface
+        // 标记接口
     }
 }
+
