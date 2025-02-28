@@ -38,6 +38,14 @@ class FetchTask<E, SplitT extends SourceSplit> implements SplitFetcherTask {
     private volatile RecordsWithSplitIds<E> lastRecords;
     private volatile boolean wakeup;
 
+    /**
+     * 创建一个FetchTask实例。
+     *
+     * @param splitReader       用于从split中读取记录的读取器。
+     * @param elementsQueue     存储记录的队列。
+     * @param splitFinishedCallback   当split完成时调用的回调。
+     * @param fetcherIndex      fetcher的索引。
+     */
     FetchTask(
             SplitReader<E, SplitT> splitReader,
             FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> elementsQueue,
@@ -51,61 +59,76 @@ class FetchTask<E, SplitT extends SourceSplit> implements SplitFetcherTask {
         this.wakeup = false;
     }
 
+    /**
+     * 运行该任务，从splitReader中获取记录并将其放入元素队列。
+     *
+     * @return 指示该任务是否完成。
+     * @throws IOException 如果在获取或处理记录时发生I/O错误。
+     */
     @Override
     public boolean run() throws IOException {
         try {
             if (!isWakenUp() && lastRecords == null) {
+                // 如果没有被唤醒并且没有lastRecords，从splitReader中获取记录。
                 lastRecords = splitReader.fetch();
             }
 
             if (!isWakenUp()) {
-                // The order matters here. We must first put the last records into the queue.
-                // This ensures the handling of the fetched records is atomic to wakeup.
+                // 如果没有被唤醒，将lastRecords放入队列。
+                // 这确保了处理已获取的记录的原子性。
                 if (elementsQueue.put(fetcherIndex, lastRecords)) {
                     if (!lastRecords.finishedSplits().isEmpty()) {
-                        // The callback does not throw InterruptedException.
+                        // 如果有已完成的split，调用回调函数。
                         splitFinishedCallback.accept(lastRecords.finishedSplits());
                     }
                     lastRecords = null;
                 }
             }
         } catch (InterruptedException e) {
-            // this should only happen on shutdown
+            // 线程中断时抛出异常。
             throw new IOException("Source fetch execution was interrupted", e);
         } finally {
-            // clean up the potential wakeup effect. It is possible that the fetcher is waken up
-            // after the clean up. In that case, either the wakeup flag will be set or the
-            // running thread will be interrupted. The next invocation of run() will see that and
-            // just skip.
+            // 清理可能的唤醒效果。
             if (isWakenUp()) {
                 wakeup = false;
             }
         }
-        // The return value of fetch task does not matter.
+        // 返回值不重要。
         return true;
     }
 
+    /**
+     * 唤醒该任务，使其继续运行。
+     */
     @Override
     public void wakeUp() {
-        // Set the wakeup flag first.
+        // 设置唤醒标志。
         wakeup = true;
         if (lastRecords == null) {
-            // Two possible cases:
-            // 1. The splitReader is reading or is about to read the records.
-            // 2. The records has been enqueued and set to null.
-            // In case 1, we just wakeup the split reader. In case 2, the next run might be skipped.
-            // In any case, the records won't be enqueued in the ongoing run().
+            // 分为两种情况：
+            // 1. splitReader正在读取或即将读取记录。
+            // 2. 记录已被入队并设置为null。
+            // 在第一种情况下，唤醒split reader。在第二种情况下，下一次运行可能会被跳过。
+            // 在任何情况下，队列中不会入队正在进行中的记录。
             splitReader.wakeUp();
         } else {
-            // The task might be blocking on enqueuing the records, just interrupt.
+            // 如果任务正在阻塞入队，中断线程。
             elementsQueue.wakeUpPuttingThread(fetcherIndex);
         }
     }
 
+    /**
+     * 检查该任务是否被唤醒。
+     * @return true表示被唤醒，false表示未被唤醒。
+     */
     private boolean isWakenUp() {
         return wakeup;
     }
 
+    /**
+     * 返回该任务的字符串表示。
+     * @return 一个字符串"FetchTask"。
+     */
     @Override
     public String toString() {
         return "FetchTask";

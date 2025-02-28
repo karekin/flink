@@ -23,12 +23,11 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Interface defining couple of essential methods for asynchronous and non blocking data polling.
+ * 定义了一些用于异步和非阻塞数据轮询的核心方法的接口。
  *
- * <p>For the most efficient usage, user of this class is supposed to call {@link #pollNext()} until
- * it returns that no more elements are available. If that happens, he should check if input {@link
- * #isFinished()}. If not, he should wait for {@link #getAvailableFuture()} {@link
- * CompletableFuture} to be completed. For example:
+ * <p>为了实现最高效的使用，用户应该调用 {@link #pollNext()}，直到它返回没有更多元素可用。
+ * 如果发生这种情况，用户应检查输入是否 {@link #isFinished()}。如果没有完成，用户应该等待
+ * {@link #getAvailableFuture()} 的 {@link CompletableFuture} 完成。例如：
  *
  * <pre>{@code
  * AsyncDataInput<T> input = ...;
@@ -40,7 +39,7 @@ import java.util.concurrent.CompletableFuture;
  * 		if (!next.isPresent()) {
  * 			break;
  * 		}
- * 		// do something with next
+ * 		// 对下一个元素进行处理
  * 	}
  *
  * 	input.getAvailableFuture().get();
@@ -49,30 +48,36 @@ import java.util.concurrent.CompletableFuture;
  */
 @Internal
 public interface PullingAsyncDataInput<T> extends AvailabilityProvider {
+
     /**
-     * Poll the next element. This method should be non blocking.
+     * 轮询下一个元素。此方法应该是非阻塞的。
      *
-     * @return {@code Optional.empty()} will be returned if there is no data to return or if {@link
-     *     #isFinished()} returns true. Otherwise {@code Optional.of(element)}.
+     * @return 如果没有数据要返回或 {@link #isFinished()} 返回 true，则返回 {@code Optional.empty()}。
+     * 否则返回 {@code Optional.of(element)}。
+     * @throws Exception 如果在轮询下一个元素时发生异常。
      */
     Optional<T> pollNext() throws Exception;
 
-    /** @return true if is finished and for example end of input was reached, false otherwise. */
+    /**
+     * 判断是否已经完成且例如达到了输入的结束，否则返回 false。
+     *
+     * @return 如果完成则返回 true，否则返回 false。
+     */
     boolean isFinished();
 
     /**
-     * Tells if we consumed all available data.
+     * 告诉我们是否消费了所有可用的数据。
      *
-     * <p>Moreover it tells us the reason why there is no more data incoming. If any of the upstream
-     * subtasks finished because of the stop-with-savepoint --no-drain, we should not drain the
-     * input. See also {@code StopMode}.
+     * <p>此外，它告诉我们为什么没有更多的数据传入。如果上游任何子任务因为停止带保存点而停止（--no-drain），我们就不应该消耗输入。
+     * 详见 {@code StopMode}。
+     * @return 当前数据输入的结束状态。
      */
     EndOfDataStatus hasReceivedEndOfData();
 
-    /** Status for describing if we have reached the end of data. */
+    /** 用于描述是否已经到达数据结束的状态。 */
     enum EndOfDataStatus {
-        NOT_END_OF_DATA,
-        DRAINED,
-        STOPPED
+        NOT_END_OF_DATA, // 尚未到达数据结束
+        DRAINED,         // 数据已经完全被消耗
+        STOPPED          // 因为停止命令而停止
     }
 }

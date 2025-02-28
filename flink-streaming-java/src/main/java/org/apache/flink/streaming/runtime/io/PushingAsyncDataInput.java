@@ -27,32 +27,45 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 
 /**
- * The variant of {@link PullingAsyncDataInput} that is defined for handling both network input and
- * source input in a unified way via {@link #emitNext(DataOutput)} instead of returning {@code
- * Optional.empty()} via {@link PullingAsyncDataInput#pollNext()}.
+ * {@link PullingAsyncDataInput} 的变体，通过 {@link #emitNext(DataOutput)} 方法以统一方式处理网络输入和源输入，
+ * 而不是像 {@link PullingAsyncDataInput#pollNext()} 那样返回 {@code Optional.empty()}。
+ *
+ * 此接口用于处理非阻塞的数据输入，适用于需要以非阻塞方式从数据源拉取数据并在异步上下文中处理的场景。
+ * 异步数据输入可以在不阻塞主线程的情况下处理诸如网络请求或磁盘读取等操作，从而提高系统的响应能力和吞吐量。
  */
 
 @Internal
 public interface PushingAsyncDataInput<T> extends AvailabilityProvider {
 
     /**
-     * Pushes elements to the output from current data input, and returns the input status to
-     * indicate whether there are more available data in current input.
+     * 从当前数据输入中将元素推送到输出，并返回输入状态，以指示当前输入是否有更多可用数据。
      *
-     * <p>This method should be non blocking.
+     * <p>此方法应该是非阻塞的。
+     * <p>这是一个关键方法，用于从数据源中提取数据并将其推送到处理管道中。
+     * 例如，在流处理系统中，数据源可能是一个网络服务或一个文件系统。
+     * 当数据源有新数据可用时，此方法会被调用，将数据推送到输出。
+     * 非阻塞的特性意味着此方法不会等待数据准备好，而是立即返回，无论数据是否可用。
+     * 这使得系统能够更高效地处理高吞吐量的数据流。
+     *
+     * @param output 数据输出对象，用于接收和处理数据。
+     * @return 数据输入状态，表示是否有更多可用数据。
+     * @throws Exception 如果在推送数据到输出时发生任何异常。
      */
     DataInputStatus emitNext(DataOutput<T> output) throws Exception;
 
     /**
-     * Basic data output interface used in emitting the next element from data input.
+     * 用于从数据输入中发出下一个元素的基本数据输出接口。
      *
-     * @param <T> The type encapsulated with the stream record.
+     * <p>此接口提供了将数据发送到下游处理组件的方法，例如发送数据记录、水印（watermark）、延迟标记（latency marker）等。
+     * 通过实现此接口，可以将数据从不同的数据源传输到处理管道中，进行进一步的处理和分析。
+     *
+     * @param <T> 数据流中封装的类型。
      */
     /**
      * @授课老师(微信): yi_locus
      * email: 156184212@qq.com
      * 基本数据输出接口，用于从数据输入中发出下一个元素。
-    */
+     */
     interface DataOutput<T> {
 
         void emitRecord(StreamRecord<T> streamRecord) throws Exception;

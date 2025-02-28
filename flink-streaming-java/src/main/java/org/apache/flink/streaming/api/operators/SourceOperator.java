@@ -85,63 +85,58 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * Base source operator only used for integrating the source reader which is proposed by FLIP-27. It
- * implements the interface of {@link PushingAsyncDataInput} which is naturally compatible with one
- * input processing in runtime stack.
+ * 基础源操作符，仅用于集成 FLIP-27 提出的源读取器（Source Reader）。它实现了 {@link PushingAsyncDataInput} 接口，
+ * 该接口与运行时栈中的单输入处理方式天然兼容。
  *
- * <p><b>Important Note on Serialization:</b> The SourceOperator inherits the {@link
- * java.io.Serializable} interface from the StreamOperator, but is in fact NOT serializable. The
- * operator must only be instantiated in the StreamTask from its factory.
+ * <p><b>重要序列化注意事项：</b>SourceOperator 从 StreamOperator 继承了 {@link java.io.Serializable} 接口，但事实上它不是可序列化的。
+ * 该操作符只能在 StreamTask 中通过其工厂实例化。
  *
- * @param <OUT> The output type of the operator.
+ * @param <OUT> 操作符的输出类型。
  */
 @Internal
 public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStreamOperator<OUT>
         implements OperatorEventHandler,
-                PushingAsyncDataInput<OUT>,
-                TimestampsAndWatermarks.WatermarkUpdateListener {
+        PushingAsyncDataInput<OUT>,
+        TimestampsAndWatermarks.WatermarkUpdateListener {
     private static final long serialVersionUID = 1405537676017904695L;
 
-    // Package private for unit test.
+    // 用于单测，定义了一个保存源读取器状态的 ListStateDescriptor
     static final ListStateDescriptor<byte[]> SPLITS_STATE_DESC =
             new ListStateDescriptor<>("SourceReaderState", BytePrimitiveArraySerializer.INSTANCE);
 
     /**
-     * The factory for the source reader. This is a workaround, because currently the SourceReader
-     * must be lazily initialized, which is mainly because the metrics groups that the reader relies
-     * on is lazily initialized.
+     * 源读取器的工厂。这是一个变通方案，因为当前 SourceReader 必须延迟初始化，这主要是因为读取器依赖的指标组是延迟初始化的。
      */
     private final FunctionWithException<SourceReaderContext, SourceReader<OUT, SplitT>, Exception>
             readerFactory;
 
     /**
-     * The serializer for the splits, applied to the split types before storing them in the reader
-     * state.
+     * 分裂序列化器，用于在将分裂类型存储到读取器状态之前对其进行序列化。
      */
     private final SimpleVersionedSerializer<SplitT> splitSerializer;
 
-    /** The event gateway through which this operator talks to its coordinator. */
+    /** 用于事件网关，操作符通过它与协调器进行通信。 */
     private final OperatorEventGateway operatorEventGateway;
 
-    /** The factory for timestamps and watermark generators. */
+    /** 时间戳和水印生成器的工厂。 */
     private final WatermarkStrategy<OUT> watermarkStrategy;
 
     private final WatermarkAlignmentParams watermarkAlignmentParams;
 
-    /** The Flink configuration. */
+    /** Flth 配置。 */
     private final Configuration configuration;
 
     /**
-     * Host name of the machine where the operator runs, to support locality aware work assignment.
+     * 操作符运行所在机器的主机名，用于支持基于位置的工作分配。
      */
     private final String localHostname;
 
-    /** Whether to emit intermediate watermarks or only one final watermark at the end of input. */
+    /** 是否发出中间水印，还是仅在输入结束时发出一个最终水印。 */
     private final boolean emitProgressiveWatermarks;
 
-    // ---- lazily initialized fields (these fields are the "hot" fields) ----
+    // ---- 延迟初始化的字段（这些字段是“热”字段） ----
 
-    /** The source reader that does most of the work. */
+    /** 执行大部分工作的源读取器。 */
     private SourceReader<OUT, SplitT> sourceReader;
 
     private ReaderOutput<OUT> currentMainOutput;
@@ -152,17 +147,16 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
 
     private boolean idle = false;
 
-    /** The state that holds the currently assigned splits. */
+    /** 保存当前分配的分裂状态。 */
     private ListState<SplitT> readerState;
 
     /**
-     * The event time and watermarking logic. Ideally this would be eagerly passed into this
-     * operator, but we currently need to instantiate this lazily, because the metric groups exist
-     * only later.
+     * 事件时间和水印逻辑，在此逻辑尚未完全形成时初始化某些方面。
+     * 理想情况下，这应该在初始化时传入此操作符，但由于目前指标组仅在稍后存在，因此必须延迟初始化。
      */
     private TimestampsAndWatermarks<OUT> eventTimeLogic;
 
-    /** A mode to control the behaviour of the {@link #emitNext(DataOutput)} method. */
+    /** 用于控制 {@link #emitNext(DataOutput)} 方法的行为的模式。 */
     private OperatingMode operatingMode;
 
     private final CompletableFuture<Void> finished = new CompletableFuture<>();
@@ -187,7 +181,7 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
     private InternalSourceReaderMetricGroup sourceMetricGroup;
 
     private long currentMaxDesiredWatermark = Watermark.MAX_WATERMARK.getTimestamp();
-    /** Can be not completed only in {@link OperatingMode#WAITING_FOR_ALIGNMENT} mode. */
+    /** 只能在 {@link OperatingMode#WAITING_FOR_ALIGNMENT} 模式下未完成时有效。 */
     private CompletableFuture<Void> waitingForAlignmentFuture =
             CompletableFuture.completedFuture(null);
 
@@ -238,16 +232,9 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
     }
 
     /**
-     * Initializes the reader. The code from this method should ideally happen in the constructor or
-     * in the operator factory even. It has to happen here at a slightly later stage, because of the
-     * lazy metric initialization.
-     *
-     * <p>Calling this method explicitly is an optional way to have the reader initialization a bit
-     * earlier than in open(), as needed by the {@link
-     * org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask}
-     *
-     * <p>This code should move to the constructor once the metric groups are available at task
-     * setup time.
+     * 初始化读取器。该方法中的代码理想情况下应该发生在构造函数或甚至操作符工厂中。但由于延迟的指标初始化，它必须稍后在此处执行。
+     * <p> explicitlt 调用该方法是一个可选的方法，可以比在 open() 中稍早地初始化读取器，如 {@link org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask} 所需的那样。
+     * <p>一旦任务设置时指标组可用，该代码就应移到构造函数中。
      */
     public void initReader() throws Exception {
         if (sourceReader != null) {
@@ -324,8 +311,7 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
     public void open() throws Exception {
         initReader();
 
-        // in the future when we this one is migrated to the "eager initialization" operator
-        // (StreamOperatorV2), then we should evaluate this during operator construction.
+        // 在未来，当该操作符迁移到“急切初始化”操作符（StreamOperatorV2）时，应该在操作符构造时对其进行评估。
         if (emitProgressiveWatermarks) {
             eventTimeLogic =
                     TimestampsAndWatermarks.createProgressiveEventTimeLogic(
@@ -339,18 +325,18 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
                             watermarkStrategy, sourceMetricGroup);
         }
 
-        // restore the state if necessary.
+        // 恢复状态（如必要）。
         final List<SplitT> splits = CollectionUtil.iterableToList(readerState.get());
         if (!splits.isEmpty()) {
             LOG.info("Restoring state for {} split(s) to reader.", splits.size());
             sourceReader.addSplits(splits);
         }
 
-        // Register the reader to the coordinator.
+        // 将读取器注册到协调器。
         registerReader();
 
         sourceMetricGroup.idlingStarted();
-        // Start the reader after registration, sending messages in start is allowed.
+        // 启动读取器，发送消息后启动。
         sourceReader.start();
 
         eventTimeLogic.startPeriodicWatermarkEmits();
@@ -403,15 +389,12 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
 
     @Override
     public DataInputStatus emitNext(DataOutput<OUT> output) throws Exception {
-        // guarding an assumptions we currently make due to the fact that certain classes
-        // assume a constant output, this assumption does not need to stand if we emitted all
-        // records. In that case the output will change to FinishedDataOutput
+        // 确保当前假设，因为某些类假设一个恒定的 output，在这种情况下，output 将更改为 FinishedDataOutput。
         assert lastInvokedOutput == output
                 || lastInvokedOutput == null
                 || this.operatingMode == OperatingMode.DATA_FINISHED;
 
-        // short circuit the hot path. Without this short circuit (READING handled in the
-        // switch/case) InputBenchmark.mapSink was showing a performance regression.
+        // 快速通过热门路径。如果没有这种快速通过（READING 在 switch/case 中处理），InputBenchmark.mapSink 表现出了性能下降。
         if (operatingMode != OperatingMode.READING) {
             return emitNextNotReading(output);
         }
@@ -429,9 +412,7 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
         switch (operatingMode) {
             case OUTPUT_NOT_INITIALIZED:
                 if (watermarkAlignmentParams.isEnabled()) {
-                    // Only wrap the output when watermark alignment is enabled, as otherwise this
-                    // introduces a small performance regression (probably because of an extra
-                    // virtual call)
+                    // 如果启用了水印对齐，应仅在此时包装输出。否则，这将引入小的性能退化（可能是由于额外的虚调用）。
                     processingTimeService.scheduleWithFixedDelay(
                             this::emitLatestWatermark,
                             watermarkAlignmentParams.getUpdateInterval(),
@@ -464,7 +445,7 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
         currentMainOutput = eventTimeLogic.createMainOutput(output, this);
         initializeLatencyMarkerEmitter(output);
         lastInvokedOutput = output;
-        // Create per-split output for pending splits added before main output is initialized
+        // 为尚未初始化的 main output 的 splits 创建输出
         createOutputForSplits(outputPendingSplits);
         this.operatingMode = OperatingMode.READING;
     }
@@ -474,10 +455,10 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
                 getExecutionConfig().isLatencyTrackingConfigured()
                         ? getExecutionConfig().getLatencyTrackingInterval()
                         : getContainingTask()
-                                .getEnvironment()
-                                .getTaskManagerInfo()
-                                .getConfiguration()
-                                .get(MetricOptions.LATENCY_INTERVAL);
+                        .getEnvironment()
+                        .getTaskManagerInfo()
+                        .getConfiguration()
+                        .get(MetricOptions.LATENCY_INTERVAL);
         if (latencyTrackingInterval > 0) {
             latencyMarkerEmitter =
                     new LatencyMarkerEmitter<>(
@@ -540,24 +521,18 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
     }
 
     /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 初始化状态的方法，通常用于在流处理任务（如Flink任务）启动时恢复或设置任务的状态。
-     *
-     * @param context 状态初始化上下文，包含了初始化状态所需的所有信息，如状态后端、检查点等。
-     * @throws Exception 如果在初始化状态过程中遇到错误，则会抛出异常。
-    */
+     * 初始化状态的方法，通常用于在流处理任务（如 Flink 任务）启动时恢复或设置任务的状态。
+     */
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {
-        // 调用父类的initializeState方法，进行任何必要的默认状态初始化或准备工作。
+        // 调用父类的 initializeState 方法，进行任何必要的默认状态初始化或准备工作。
         super.initializeState(context);
-        // 从OperatorStateStore中获取名为SPLITS_STATE_DESC的ListState对象，用于存储和恢复字节数组列表的状态。
-        // SPLITS_STATE_DESC通常是一个状态描述符，用于标识状态的类型和名称。
+        // 从 OperatorStateStore 中获取名为 SPLITS_STATE_DESC 的 ListState 对象，用于存储和恢复字节数组列表的状态。
         final ListState<byte[]> rawState =
                 context.getOperatorStateStore().getListState(SPLITS_STATE_DESC);
-        // 使用获取到的rawState和splitSerializer（一个序列化器，用于将分裂（splits）数据序列化和反序列化为字节数组）
-        // 创建一个SimpleVersionedListState对象，该对象封装了rawState并提供了一些额外的功能，如版本控制。
-        // readerState用于后续读取状态信息，它现在与SPLITS_STATE_DESC对应的状态绑定在一起。
+        // 使用获取到的 rawState 和 splitSerializer（序列化器）创建一个 SimpleVersionedListState 对象。
+        // 该对象封装了 rawState 并提供了一些额外的功能，如版本控制。
+        // readerState 用于后续读取状态信息，它现在与 SPLITS_STATE_DESC 对应的状态绑定在一起。
         readerState = new SimpleVersionedListState<>(rawState, splitSerializer);
     }
 
@@ -603,12 +578,11 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
             List<SplitT> newSplits = event.splits(splitSerializer);
             numSplits += newSplits.size();
             if (operatingMode == OperatingMode.OUTPUT_NOT_INITIALIZED) {
-                // For splits arrived before the main output is initialized, store them into the
-                // pending list. Outputs of these splits will be created once the main output is
-                // ready.
+                // 如果主输出尚未初始化，将到达的 splits 存储到 pending 列表中。
+                // 在主输出准备就绪时，会为这些 splits 创建输出。
                 outputPendingSplits.addAll(newSplits);
             } else {
-                // Create output directly for new splits if the main output is already initialized.
+                // 如果主输出已经初始化，则直接为这些 splits 创建输出
                 createOutputForSplits(newSplits);
             }
             sourceReader.addSplits(newSplits);
@@ -651,15 +625,13 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
     }
 
     /**
-     * Finds the splits that are beyond the current max watermark and pauses them. At the same time,
-     * splits that have been paused and where the global watermark caught up are resumed.
-     *
-     * <p>Note: This takes effect only if there are multiple splits, otherwise it does nothing.
+     * <p>找出了需要被暂停的超过当前最大水印的 splits。</p>
+     * <p>同时，恢复那些已经被暂停且全局水印已经追上的 splits。</p>
+     * <p>注意：只有在 splits 数量大于 1 时才起作用，否则不执行任何操作。</p>
      */
     private void checkSplitWatermarkAlignment() {
         if (numSplits <= 1) {
-            // A single split can't overtake any other splits assigned to this operator instance.
-            // It is sufficient for the source to stop processing.
+            // 单个 split 无法超过此操作符实例分配的其他 splits，对源看起来是处理的。
             return;
         }
         Collection<String> splitsToPause = new ArrayList<>();
@@ -717,7 +689,7 @@ public class SourceOperator<OUT, SplitT extends SourceSplit> extends AbstractStr
                         getRuntimeContext().getTaskInfo().getIndexOfThisSubtask(), localHostname));
     }
 
-    // --------------- methods for unit tests ------------
+    // ------------ 方法用于单元测试 UNIT TESTS ------------
 
     @VisibleForTesting
     public SourceReader<OUT, SplitT> getSourceReader() {
