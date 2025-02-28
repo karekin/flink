@@ -36,15 +36,17 @@ import java.io.IOException;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 
-/** Serializer for {@link BinaryRowData}. */
+/**
+ * 用于 BinaryRowData 的序列化器。
+ */
 @Internal
 public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRowData> {
 
     private static final long serialVersionUID = 1L;
-    public static final int LENGTH_SIZE_IN_BYTES = 4;
+    public static final int LENGTH_SIZE_IN_BYTES = 4; // 长度值占用的字节数
 
-    private final int numFields;
-    private final int fixedLengthPartSize;
+    private final int numFields; // 字段数量
+    private final int fixedLengthPartSize; // 固定长度部分的大小
 
     public BinaryRowDataSerializer(int numFields) {
         this.numFields = numFields;
@@ -83,19 +85,18 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
 
     @Override
     public void serialize(BinaryRowData record, DataOutputView target) throws IOException {
-        target.writeInt(record.getSizeInBytes());
+        target.writeInt(record.getSizeInBytes()); // 写入行数据的大小
         if (target instanceof MemorySegmentWritable) {
             serializeWithoutLength(record, (MemorySegmentWritable) target);
         } else {
-            BinarySegmentUtils.copyToView(
-                    record.getSegments(), record.getOffset(), record.getSizeInBytes(), target);
+            BinarySegmentUtils.copyToView(record.getSegments(), record.getOffset(), record.getSizeInBytes(), target);
         }
     }
 
     @Override
     public BinaryRowData deserialize(DataInputView source) throws IOException {
         BinaryRowData row = new BinaryRowData(numFields);
-        int length = source.readInt();
+        int length = source.readInt(); // 读取行数据的大小
         byte[] bytes = new byte[length];
         source.readFully(bytes);
         row.pointTo(MemorySegmentFactory.wrap(bytes), 0, length);
@@ -105,13 +106,12 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     @Override
     public BinaryRowData deserialize(BinaryRowData reuse, DataInputView source) throws IOException {
         MemorySegment[] segments = reuse.getSegments();
-        checkArgument(
-                segments == null || (segments.length == 1 && reuse.getOffset() == 0),
+        checkArgument(segments == null || (segments.length == 1 && reuse.getOffset() == 0),
                 "Reuse BinaryRowData should have no segments or only one segment and offset start at 0.");
 
         int length = source.readInt();
         if (segments == null || segments[0].size() < length) {
-            segments = new MemorySegment[] {MemorySegmentFactory.wrap(new byte[length])};
+            segments = new MemorySegment[] { MemorySegmentFactory.wrap(new byte[length]) };
         }
         source.readFully(segments[0].getArray(), 0, length);
         reuse.pointTo(segments, 0, length);
@@ -131,8 +131,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     // ============================ Page related operations ===================================
 
     @Override
-    public int serializeToPages(BinaryRowData record, AbstractPagedOutputView headerLessView)
-            throws IOException {
+    public int serializeToPages(BinaryRowData record, AbstractPagedOutputView headerLessView) throws IOException {
         checkArgument(headerLessView.getHeaderLength() == 0);
         int skip = checkSkipWriteForFixLengthPart(headerLessView);
         headerLessView.writeInt(record.getSizeInBytes());
@@ -140,8 +139,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
         return skip;
     }
 
-    private static void serializeWithoutLength(BinaryRowData record, MemorySegmentWritable writable)
-            throws IOException {
+    private static void serializeWithoutLength(BinaryRowData record, MemorySegmentWritable writable) throws IOException {
         if (record.getSegments().length == 1) {
             writable.write(record.getSegments()[0], record.getOffset(), record.getSizeInBytes());
         } else {
@@ -149,8 +147,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
         }
     }
 
-    public static void serializeWithoutLengthSlow(BinaryRowData record, MemorySegmentWritable out)
-            throws IOException {
+    public static void serializeWithoutLengthSlow(BinaryRowData record, MemorySegmentWritable out) throws IOException {
         int remainSize = record.getSizeInBytes();
         int posInSegOfRecord = record.getOffset();
         int segmentSize = record.getSegments()[0].size();
@@ -159,7 +156,6 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
             assert nWrite > 0;
             out.write(segOfRecord, posInSegOfRecord, nWrite);
 
-            // next new segment.
             posInSegOfRecord = 0;
             remainSize -= nWrite;
             if (remainSize == 0) {
@@ -170,22 +166,19 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     @Override
-    public BinaryRowData deserializeFromPages(AbstractPagedInputView headerLessView)
-            throws IOException {
+    public BinaryRowData deserializeFromPages(AbstractPagedInputView headerLessView) throws IOException {
         return deserializeFromPages(createInstance(), headerLessView);
     }
 
     @Override
-    public BinaryRowData deserializeFromPages(
-            BinaryRowData reuse, AbstractPagedInputView headerLessView) throws IOException {
+    public BinaryRowData deserializeFromPages(BinaryRowData reuse, AbstractPagedInputView headerLessView) throws IOException {
         checkArgument(headerLessView.getHeaderLength() == 0);
         checkSkipReadForFixLengthPart(headerLessView);
         return deserialize(reuse, headerLessView);
     }
 
     @Override
-    public BinaryRowData mapFromPages(BinaryRowData reuse, AbstractPagedInputView headerLessView)
-            throws IOException {
+    public BinaryRowData mapFromPages(BinaryRowData reuse, AbstractPagedInputView headerLessView) throws IOException {
         checkArgument(headerLessView.getHeaderLength() == 0);
         checkSkipReadForFixLengthPart(headerLessView);
         pointTo(headerLessView.readInt(), reuse, headerLessView);
@@ -200,13 +193,12 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     /**
-     * Copy a binaryRow which stored in paged input view to output view.
+     * 将存储在分页输入视图中的二进制行复制到输出视图。
      *
-     * @param source source paged input view where the binary row stored
-     * @param target the target output view.
+     * @param source 源分页输入视图，其中存储了二进制行
+     * @param target 目标输出视图
      */
-    public void copyFromPagesToView(AbstractPagedInputView source, DataOutputView target)
-            throws IOException {
+    public void copyFromPagesToView(AbstractPagedInputView source, DataOutputView target) throws IOException {
         checkSkipReadForFixLengthPart(source);
         int length = source.readInt();
         target.writeInt(length);
@@ -214,35 +206,28 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     /**
-     * Point row to memory segments with offset(in the AbstractPagedInputView) and length.
+     * 将行指向分页输入视图中的内存段，从偏移量（在 AbstractPagedInputView 中）和长度。
      *
-     * @param length row length.
-     * @param reuse reuse BinaryRowData object.
-     * @param headerLessView source memory segments container.
+     * @param length 行长
+     * @param reuse  重用的 BinaryRowData 对象
+     * @param headerLessView 内存段的源容器
      */
-    public void pointTo(int length, BinaryRowData reuse, AbstractPagedInputView headerLessView)
-            throws IOException {
+    public void pointTo(int length, BinaryRowData reuse, AbstractPagedInputView headerLessView) throws IOException {
         checkArgument(headerLessView.getHeaderLength() == 0);
         if (length < 0) {
-            throw new IOException(
-                    String.format(
-                            "Read unexpected bytes in source of positionInSegment[%d] and limitInSegment[%d]",
-                            headerLessView.getCurrentPositionInSegment(),
-                            headerLessView.getCurrentSegmentLimit()));
+            throw new IOException(String.format(
+                    "Read unexpected bytes in source of positionInSegment[%d] and limitInSegment[%d]",
+                    headerLessView.getCurrentPositionInSegment(), headerLessView.getCurrentSegmentLimit()));
         }
 
-        int remainInSegment =
-                headerLessView.getCurrentSegmentLimit()
-                        - headerLessView.getCurrentPositionInSegment();
+        int remainInSegment = headerLessView.getCurrentSegmentLimit() - headerLessView.getCurrentPositionInSegment();
         MemorySegment currSeg = headerLessView.getCurrentSegment();
         int currPosInSeg = headerLessView.getCurrentPositionInSegment();
         if (remainInSegment >= length) {
-            // all in one segment, that's good.
             reuse.pointTo(currSeg, currPosInSeg, length);
             headerLessView.skipBytesToRead(length);
         } else {
-            pointToMultiSegments(
-                    reuse, headerLessView, length, length - remainInSegment, currSeg, currPosInSeg);
+            pointToMultiSegments(reuse, headerLessView, length, length - remainInSegment, currSeg, currPosInSeg);
         }
     }
 
@@ -276,11 +261,10 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     /**
-     * We need skip bytes to write when the remain bytes of current segment is not enough to write
-     * binary row fixed part. See {@link BinaryRowData}.
+     * 如果当前分段剩余的字节不足以写入二进制行的固定部分，则跳过写入。
+     * 请参阅 {@link BinaryRowData}.
      */
     private int checkSkipWriteForFixLengthPart(AbstractPagedOutputView out) throws IOException {
-        // skip if there is no enough size.
         int available = out.getSegmentSize() - out.getCurrentPositionInSegment();
         if (available < getSerializedRowFixedPartLength()) {
             out.advance();
@@ -290,8 +274,8 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     /**
-     * We need skip bytes to read when the remain bytes of current segment is not enough to write
-     * binary row fixed part. See {@link BinaryRowData}.
+     * 如果当前分段剩余的字节不足以写入二进制行的固定部分，则跳过读取。
+     * 请参阅 {@link BinaryRowData}.
      */
     public void checkSkipReadForFixLengthPart(AbstractPagedInputView source) throws IOException {
         // skip if there is no enough size.
@@ -302,7 +286,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
         }
     }
 
-    /** Return fixed part length to serialize one row. */
+    /** 返回序列化一行的固定部分的长度。 */
     public int getSerializedRowFixedPartLength() {
         return getFixedLengthPartSize() + LENGTH_SIZE_IN_BYTES;
     }
@@ -320,8 +304,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
 
     @Override
     public boolean equals(Object obj) {
-        return obj instanceof BinaryRowDataSerializer
-                && numFields == ((BinaryRowDataSerializer) obj).numFields;
+        return obj instanceof BinaryRowDataSerializer && numFields == ((BinaryRowDataSerializer) obj).numFields;
     }
 
     @Override
@@ -335,8 +318,7 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
     }
 
     /** {@link TypeSerializerSnapshot} for {@link BinaryRowDataSerializer}. */
-    public static final class BinaryRowDataSerializerSnapshot
-            implements TypeSerializerSnapshot<BinaryRowData> {
+    public static final class BinaryRowDataSerializerSnapshot implements TypeSerializerSnapshot<BinaryRowData> {
         private static final int CURRENT_VERSION = 3;
 
         private int numFields;
@@ -361,19 +343,15 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
         }
 
         /**
-         * @授课老师(微信): yi_locus
-         * email: 156184212@qq.com
          * 从输入流中读取快照数据。
          *
-         * @param readVersion         要读取的快照的版本号
-         * @param in                  包含快照数据的输入流
+         * @param readVersion 要读取的快照的版本号
+         * @param in          包含快照数据的输入流
          * @param userCodeClassLoader 用户代码类加载器，通常用于反序列化用户自定义的对象
-         * @throws IOException         如果在读取过程中发生I/O错误，则抛出此异常
-        */
+         * @throws IOException 如果在读取过程中发生I/O错误，则抛出此异常
+         */
         @Override
-        public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader)
-                throws IOException {
-            // 从输入流中读取字段的数量
+        public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader) throws IOException {
             this.numFields = in.readInt();
         }
 
@@ -383,14 +361,12 @@ public class BinaryRowDataSerializer extends AbstractRowDataSerializer<BinaryRow
         }
 
         @Override
-        public TypeSerializerSchemaCompatibility<BinaryRowData> resolveSchemaCompatibility(
-                TypeSerializerSnapshot<BinaryRowData> oldSerializerSnapshot) {
+        public TypeSerializerSchemaCompatibility<BinaryRowData> resolveSchemaCompatibility(TypeSerializerSnapshot<BinaryRowData> oldSerializerSnapshot) {
             if (!(oldSerializerSnapshot instanceof BinaryRowDataSerializerSnapshot)) {
                 return TypeSerializerSchemaCompatibility.incompatible();
             }
 
-            BinaryRowDataSerializerSnapshot oldBinaryRowSerializerSnapshot =
-                    (BinaryRowDataSerializerSnapshot) oldSerializerSnapshot;
+            BinaryRowDataSerializerSnapshot oldBinaryRowSerializerSnapshot = (BinaryRowDataSerializerSnapshot) oldSerializerSnapshot;
             if (numFields != oldBinaryRowSerializerSnapshot.numFields) {
                 return TypeSerializerSchemaCompatibility.incompatible();
             } else {

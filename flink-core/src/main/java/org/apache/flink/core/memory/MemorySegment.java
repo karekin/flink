@@ -40,232 +40,145 @@ import java.util.function.Function;
 import static org.apache.flink.core.memory.MemoryUtils.getByteBufferAddress;
 
 /**
- * This class represents a piece of memory managed by Flink.
+ * 这个类表示一个由 Flink 管理的内存块。
  *
- * <p>The memory can be on-heap, off-heap direct or off-heap unsafe. This is transparently handled
- * by this class.
+ * <p>内存可以位于堆内、堆外直接内存或者堆外非直接内存。这个类透明地处理这些内存类型。
  *
- * <p>This class fulfills conceptually a similar purpose as Java's {@link java.nio.ByteBuffer}. We
- * add this specialized class for various reasons:
+ * <p>这个类的概念类似于 Java 的 {@link java.nio.ByteBuffer}，但添加了额外的二进制比较、交换和复制方法。
+ * 它还使用折叠的范围检查和内存段释放检查，提供了绝对定位的大批量读写方法，保证了线程安全。
+ * 并且，它显式地提供了大端序和小端序访问方法，而不是内部跟踪字节顺序。
+ * 此外，它能够透明且高效地在堆内和堆外内存之间移动数据。
  *
- * <ul>
- *   <li>It offers additional binary compare, swap, and copy methods.
- *   <li>It uses collapsed checks for range check and memory segment disposal.
- *   <li>It offers absolute positioning methods for bulk put/get methods, to guarantee thread safe
- *       use.
- *   <li>It offers explicit big-endian / little-endian access methods, rather than tracking
- *       internally a byte order.
- *   <li>It transparently and efficiently moves data between on-heap and off-heap variants.
- * </ul>
+ * <p><i>实现实现</i>: 我们使用大量本地指令支持的操作，以实现高效率。多字节类型（int、 long、 float、 double 等）
+ * 使用“unsafe”本地命令读取和写入。
  *
- * <p><i>Comments on the implementation</i>: We make heavy use of operations that are supported by
- * native instructions, to achieve a high efficiency. Multi byte types (int, long, float, double,
- * ...) are read and written with "unsafe" native commands.
- *
- * <p><i>Note on efficiency</i>: For best efficiency, we do not separate implementations of
- * different memory types with inheritance, to avoid the overhead from looking for concrete
- * implementations on invocations of abstract methods.
+ * <p><i>效率说明</i>: 为了避免继承不同内存类型实现时调用抽象方法带来的开销，所以不使用继承分离不同内存类型的实现。
  */
 @Internal
 public final class MemorySegment {
 
-    /** System property for activating multiple free segment check, for testing purpose. */
+    /** 用于测试目的的系统属性，用于激活多释放段检查。 */
     public static final String CHECK_MULTIPLE_FREE_PROPERTY =
             "flink.tests.check-segment-multiple-free";
 
     private static final boolean checkMultipleFree =
             System.getProperties().containsKey(CHECK_MULTIPLE_FREE_PROPERTY);
 
-    /** The unsafe handle for transparent memory copied (heap / off-heap). */
-    /** 创建Unsafe句柄 */
+    /** 创建 Unsafe 句柄。 */
     @SuppressWarnings("restriction")
     private static final sun.misc.Unsafe UNSAFE = MemoryUtils.UNSAFE;
 
-    /** The beginning of the byte array contents, relative to the byte array object. */
-    /** 字节数组内容的开头，相对于字节数组对象 */
+    /** 字节数组内容的开头，相对于字节数组对象。 */
     @SuppressWarnings("restriction")
     private static final long BYTE_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
 
     /**
-     * Constant that flags the byte order. Because this is a boolean constant, the JIT compiler can
-     * use this well to aggressively eliminate the non-applicable code paths.
+     * 标记字节顺序的常量。因为这是一个布尔常量，JIT 编译器可以很好地使用它来积极地消除不适用的代码路径。
      */
-    /** 标记字节顺序的常量。因为这是一个布尔常量，JIT编译器可以很好地使用它来积极地消除不适用的代码路径。 */
     private static final boolean LITTLE_ENDIAN =
             (ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN);
 
     // ------------------------------------------------------------------------
 
     /**
-     * The heap byte array object relative to which we access the memory.
+     * 相对于堆字节数组对象访问内存的堆字节数组对象。
      *
-     * <p>Is non-<tt>null</tt> if the memory is on the heap, and is <tt>null</tt>, if the memory is
-     * off the heap. If we have this buffer, we must never void this reference, or the memory
-     * segment will point to undefined addresses outside the heap and may in out-of-order execution
-     * cases cause segmentation faults.
+     * <p>如果内存是堆内内存，则是非 null，否则为 null。如果这个缓冲区存在，我们决不能 void 这个引用，否则内存段将指向堆外未定义的地址，
+     * 并可能在无序执行的情况下导致段错误。
      */
-    /** 相对于我们访问内存的堆字节数组对象。 */
     @Nullable private final byte[] heapMemory;
 
     /**
-     * The direct byte buffer that wraps the off-heap memory. This memory segment holds a reference
-     * to that buffer, so as long as this memory segment lives, the memory will not be released.
+     * 包封装堆外内存的直接字节缓冲区。这个内存段持有对这个缓冲区的引用，只要这个内存段存在，内存就不会被释放。
      */
     @Nullable private ByteBuffer offHeapBuffer;
 
     /**
-     * The address to the data, relative to the heap memory byte array. If the heap memory byte
-     * array is <tt>null</tt>, this becomes an absolute memory address outside the heap.
-     */
-    /**
-     * 数据的地址，相对于堆内存字节数组。
-     * 如果堆内存字节数组＜tt＞为null＜/tt＞，则这将成为堆外的绝对内存地址。
+     * 数据的地址，相对于堆内存字节数组。如果堆内存字节数组是 null，这将成为堆外的绝对内存地址。
      */
     private long address;
 
     /**
-     * The address one byte after the last addressable byte, i.e. <tt>address + size</tt> while the
-     * segment is not disposed.
-     */
-    /**
-     * 最后一个可寻址字节后一个字节的地址，即未处理段时的<tt>地址+大小</tt>。
+     * 最后一个可寻址字节后一个字节的地址，即分段未被释放时的地址 + 大小。
      */
     private final long addressLimit;
 
-    /** The size in bytes of the memory segment. */
     /** 内存段的大小（以字节为单位）。 */
     private final int size;
 
-    /** Optional owner of the memory segment. */
-    /** 内存段的可选所有者 */
+    /** 内存段的可选所有者。 */
     @Nullable private final Object owner;
 
     @Nullable private Runnable cleaner;
 
     /**
-     * Wrapping is not allowed when the underlying memory is unsafe. Unsafe memory can be actively
-     * released, without reference counting. Therefore, access from wrapped buffers, which may not
-     * be aware of the releasing of memory, could be risky.
-     */
-    /**
-     * 当基础内存不安全时，不允许换行。不安全的内存可以主动释放，
-     * 而无需进行引用计数。因此，从可能不知道内存释放的封装缓冲区进行访问可能是有风险的。
+     * 当底层内存不安全时，不允许封装。不安全的内存可以主动释放，而无需进行引用计数。因此，从封装缓冲区访问可能会因不了解内存释放而有风险。
      */
     private final boolean allowWrap;
 
     private final AtomicBoolean isFreedAtomic;
 
     /**
-     * Creates a new memory segment that represents the memory of the byte array.
-     *
-     * <p>Since the byte array is backed by on-heap memory, this memory segment holds its data on
-     * heap. The buffer must be at least of size 8 bytes.
-     *
-     * <p>The memory segment references the given owner.
-     *
-     * @param buffer The byte array whose memory is represented by this memory segment.
-     * @param owner The owner references by this memory segment.
-     */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
      * 创建表示字节数组内存的新内存段。
-     * @param buffer 表示此内存段所代表的内存的字节数组。
-     * @param owner 被此内存段引用的所有者。
-    */
+     *
+     * <p>由于字节数组由堆内内存支持，这个内存段将数据存储在堆内。缓冲区必须至少是 8 字节。
+     *
+     * <p>内存段引用所给的所有者。
+     *
+     * @param buffer 表示此内存段代表的内存的字节数组。
+     * @param owner  被此内存段引用的所有者。
+     */
     MemorySegment(@Nonnull byte[] buffer, @Nullable Object owner) {
         this.heapMemory = buffer;
         this.offHeapBuffer = null;
         this.size = buffer.length;
-        //字节数组内容的开头，相对于字节数组对象
         this.address = BYTE_ARRAY_BASE_OFFSET;
-        // 计算内存段的地址范围限制
         this.addressLimit = this.address + this.size;
         this.owner = owner;
-        // 允许内存段进行包装（某种特定的内存管理或引用计数机制）
         this.allowWrap = true;
         this.cleaner = null;
         this.isFreedAtomic = new AtomicBoolean(false);
     }
 
     /**
-     * Creates a new memory segment that represents the memory backing the given direct byte buffer.
-     * Note that the given ByteBuffer must be direct {@link
-     * java.nio.ByteBuffer#allocateDirect(int)}, otherwise this method with throw an
-     * IllegalArgumentException.
+     * 创建一个表示给定直接字节缓冲区支持的内存的新内存段。注意，给定的 ByteBuffer 必须是直接的 {@link
+     * java.nio.ByteBuffer#allocateDirect(int)}，否则这个方法会抛出一个 IllegalArgumentException。
      *
-     * <p>The memory segment references the given owner.
+     * <p>内存段引用所给的所有者。
      *
-     * @param buffer The byte buffer whose memory is represented by this memory segment.
-     * @param owner The owner references by this memory segment.
-     * @throws IllegalArgumentException Thrown, if the given ByteBuffer is not direct.
+     * @param buffer 表示此内存段代表的内存的字节缓冲区。
+     * @param owner  被此内存段引用的所有者。
+     * @throws IllegalArgumentException 如果给定的 ByteBuffer 不是直接的，则抛出此异常。
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 创建一个新的内存段，该内存段表示给定直接字节缓冲区（direct byte buffer）所支持的内存。
-     * 注意，给定的 ByteBuffer 必须是直接缓冲区（通过 java.nio.ByteBuffer#allocateDirect(int) 创建），
-     * <p>内存段引用了给定的所有者。
-     * @param buffer 表示此内存段所代表的内存的字节缓冲区。
-     * @param owner 被此内存段引用的所有者。
-     * @throws IllegalArgumentException 如果给定的 ByteBuffer 不是直接缓冲区，则抛出此异常。
-    */
     MemorySegment(@Nonnull ByteBuffer buffer, @Nullable Object owner) {
-        // 调用重载的构造函数，传入缓冲区、所有者、一个表示是否应该检查缓冲区的布尔值（此处为true）和清理器（此处为null）
         this(buffer, owner, true, null);
     }
 
     /**
-     * Creates a new memory segment that represents the memory backing the given direct byte buffer.
-     * Note that the given ByteBuffer must be direct {@link
-     * java.nio.ByteBuffer#allocateDirect(int)}, otherwise this method with throw an
-     * IllegalArgumentException.
+     * 创建一个表示给定直接字节缓冲区支持的内存的新内存段。注意，给定的 ByteBuffer 必须是直接的 {@link
+     * java.nio.ByteBuffer#allocateDirect(int)}，否则这个方法会抛出一个 IllegalArgumentException。
      *
-     * <p>The memory segment references the given owner.
+     * <p>内存段引用所给的所有者。
      *
-     * @param buffer The byte buffer whose memory is represented by this memory segment.
-     * @param owner The owner references by this memory segment.
-     * @param allowWrap Whether wrapping {@link ByteBuffer}s from the segment is allowed.
-     * @param cleaner The cleaner to be called on free segment.
-     * @throws IllegalArgumentException Thrown, if the given ByteBuffer is not direct.
+     * @param buffer           表示此内存段代表的内存的字节缓冲区。
+     * @param owner            被此内存段引用的所有者。
+     * @param allowWrap        是否允许从此内存段封装 ByteBuffer。
+     * @param cleaner          当内存段被释放时需要调用的清理器。
+     * @throws IllegalArgumentException 如果给定的 ByteBuffer 不是直接的，则抛出此异常。
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 创建一个新的内存段，该内存段表示给定直接字节缓冲区（direct byte buffer）所支持的内存。
-     * 注意，给定的 ByteBuffer 必须是直接缓冲区（通过 java.nio.ByteBuffer#allocateDirect(int) 创建），
-     * 否则此方法将抛出 IllegalArgumentException。
-     *
-     * <p>内存段引用了给定的所有者。
-     *
-     * @param buffer 表示此内存段所代表的内存的字节缓冲区。
-     * @param owner 被此内存段引用的所有者。
-     * @param allowWrap 是否允许从此内存段包装（wrap）ByteBuffer。
-     * @param cleaner 当内存段被释放时需要调用的清理器。
-     * @throws IllegalArgumentException 如果给定的 ByteBuffer 不是直接缓冲区，则抛出此异常。
-    */
     MemorySegment(
             @Nonnull ByteBuffer buffer,
             @Nullable Object owner,
             boolean allowWrap,
             @Nullable Runnable cleaner) {
-        // 堆内存引用设置为null，因为此内存段是堆外内存
         this.heapMemory = null;
-        // 将传入的直接ByteBuffer赋值给offHeapBuffer，表示这是堆外内存
         this.offHeapBuffer = buffer;
-        // 设置内存段的大小为ByteBuffer的容量
         this.size = buffer.capacity();
-        // 获取ByteBuffer在内存中的地址
         this.address = getByteBufferAddress(buffer);
-        // 计算内存段的地址范围限制
         this.addressLimit = this.address + this.size;
-        // 设置内存段的所有者
         this.owner = owner;
-        // 设置是否允许从此内存段包装ByteBuffer
         this.allowWrap = allowWrap;
-        // 设置清理器，当内存段被释放时调用
         this.cleaner = cleaner;
-        // 原子变量，表示此内存段是否已被释放
         this.isFreedAtomic = new AtomicBoolean(false);
     }
 
@@ -274,18 +187,18 @@ public final class MemorySegment {
     // ------------------------------------------------------------------------
 
     /**
-     * Gets the size of the memory segment, in bytes.
+     * 获取内存段的大小（以字节为单位）。
      *
-     * @return The size of the memory segment.
+     * @return 内存段的大小。
      */
     public int size() {
         return size;
     }
 
     /**
-     * Checks whether the memory segment was freed.
+     * 检查内存段是否已释放。
      *
-     * @return <tt>true</tt>, if the memory segment has been freed, <tt>false</tt> otherwise.
+     * @return <tt>true</tt>，如果内存段已被释放，<tt>false</tt> 否则。
      */
     @VisibleForTesting
     public boolean isFreed() {
@@ -293,23 +206,20 @@ public final class MemorySegment {
     }
 
     /**
-     * Frees this memory segment.
+     * 释放这个内存段。
      *
-     * <p>After this operation has been called, no further operations are possible on the memory
-     * segment and will fail. The actual memory (heap or off-heap) will only be released after this
-     * memory segment object has become garbage collected.
+     * <p>调用此操作之后，无法在此内存段上进一步操作，并且会失败。只有在该内存段对象成为垃圾收集的时候，才会释放实际的内存（堆或堆外）。
      */
     public void free() {
         if (isFreedAtomic.getAndSet(true)) {
-            // the segment has already been freed
+            // 内存段已经被释放
             if (checkMultipleFree) {
-                throw new IllegalStateException("MemorySegment can be freed only once!");
+                throw new IllegalStateException("MemorySegment 只能释放一次！");
             }
         } else {
-            // this ensures we can place no more data and trigger
-            // the checks for the freed segment
+            // 确保我们不能放置更多数据，并触发已释放段的检查
             address = addressLimit + 1;
-            offHeapBuffer = null; // to enable GC of unsafe memory
+            offHeapBuffer = null; // 启用堆外内存的 GC
             if (cleaner != null) {
                 cleaner.run();
                 cleaner = null;
@@ -318,72 +228,69 @@ public final class MemorySegment {
     }
 
     /**
-     * Checks whether this memory segment is backed by off-heap memory.
+     * 检查此内存段是否由堆外内存支持。
      *
-     * @return <tt>true</tt>, if the memory segment is backed by off-heap memory, <tt>false</tt> if
-     *     it is backed by heap memory.
+     * @return <tt>true</tt>，如果内存段由堆外内存支持，<tt>false</tt>，如果由堆内内存支持。
      */
     public boolean isOffHeap() {
         return heapMemory == null;
     }
 
     /**
-     * Returns the byte array of on-heap memory segments.
+     * 返回堆内内存段的基础字节数组。
      *
-     * @return underlying byte array
-     * @throws IllegalStateException if the memory segment does not represent on-heap memory
+     * @return 基础字节数组
+     * @throws IllegalStateException 如果内存段不代表堆内内存
      */
     public byte[] getArray() {
         if (heapMemory != null) {
             return heapMemory;
         } else {
-            throw new IllegalStateException("Memory segment does not represent heap memory");
+            throw new IllegalStateException("内存段不代表堆内内存");
         }
     }
 
     /**
-     * Returns the off-heap buffer of memory segments.
+     * 返回堆外内存段的基础字节缓冲区。
      *
-     * @return underlying off-heap buffer
-     * @throws IllegalStateException if the memory segment does not represent off-heap buffer
+     * @return 基础堆外缓冲区
+     * @throws IllegalStateException 如果内存段不代表堆外缓冲区
      */
     public ByteBuffer getOffHeapBuffer() {
         if (offHeapBuffer != null) {
             return offHeapBuffer;
         } else {
-            throw new IllegalStateException("Memory segment does not represent off-heap buffer");
+            throw new IllegalStateException("内存段不代表堆外缓冲区");
         }
     }
 
     /**
-     * Returns the memory address of off-heap memory segments.
+     * 返回堆外内存段的内存地址。
      *
-     * @return absolute memory address outside the heap
-     * @throws IllegalStateException if the memory segment does not represent off-heap memory
+     * @return 堆外的绝对内存地址
+     * @throws IllegalStateException 如果内存段不代表堆外内存
      */
     public long getAddress() {
         if (heapMemory == null) {
             return address;
         } else {
-            throw new IllegalStateException("Memory segment does not represent off heap memory");
+            throw new IllegalStateException("内存段不代表堆外内存");
         }
     }
 
     /**
-     * Wraps the chunk of the underlying memory located between <tt>offset</tt> and <tt>offset +
-     * length</tt> in a NIO ByteBuffer. The ByteBuffer has the full segment as capacity and the
-     * offset and length parameters set the buffers position and limit.
+     * 在 NIO ByteBuffer 中封装基础内存位于 <tt>offset</tt> 和 <tt>offset + length</tt> 之间的块。
+     * ByteBuffer 的容量为完整段，偏移量和长度参数设置缓冲区的位置和限制。
      *
-     * @param offset The offset in the memory segment.
-     * @param length The number of bytes to be wrapped as a buffer.
-     * @return A <tt>ByteBuffer</tt> backed by the specified portion of the memory segment.
-     * @throws IndexOutOfBoundsException Thrown, if offset is negative or larger than the memory
-     *     segment size, or if the offset plus the length is larger than the segment size.
+     * @param offset 偏移量
+     * @param length 要封装为缓冲区的字节数
+     * @return 以指定部分内存段为后盾的 <tt>ByteBuffer</tt>
+     * @throws IndexOutOfBoundsException 如果偏移量为负数或大于内存段大小，或者偏移量加长度大于段大小
      */
     public ByteBuffer wrap(int offset, int length) {
         if (!allowWrap) {
             throw new UnsupportedOperationException(
-                    "Wrap is not supported by this segment. This usually indicates that the underlying memory is unsafe, thus transferring of ownership is not allowed.");
+                    "此段不支持封装。这通常表示基础内存是不安全的，因此不允许传输所有权。");
         }
         return wrapInternal(offset, length);
     }
@@ -403,14 +310,14 @@ public final class MemorySegment {
                 }
             }
         } else {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         }
     }
 
     /**
-     * Gets the owner of this memory segment. Returns null, if the owner was not set.
+     * 获取此内存段的所有者。如果未设置所有者，则返回 null。
      *
-     * @return The owner of the memory segment, or null, if it does not have an owner.
+     * @return 内存段的所有者，或者如果没有所有者则为 null。
      */
     @Nullable
     public Object getOwner() {
@@ -418,116 +325,85 @@ public final class MemorySegment {
     }
 
     // ------------------------------------------------------------------------
-    //                    Random Access get() and put() methods
+    // Random Access get() and put() methods
     // ------------------------------------------------------------------------
-
-    // ------------------------------------------------------------------------
-    // Notes on the implementation: We try to collapse as many checks as
-    // possible. We need to obey the following rules to make this safe
-    // against segfaults:
     //
-    //  - Grab mutable fields onto the stack before checking and using. This
-    //    guards us against concurrent modifications which invalidate the
-    //    pointers
-    //  - Use subtractions for range checks, as they are tolerant
+    // Notes on the implementation: We try to collapse as many checks as possible.
+    // We need to obey the following rules to make this safe against segfaults:
+    //
+    //  - 在检查和使用之前，将可变字段抓取到堆栈上。这可防止并发修改使指针失效
+    //  - 使用减法进行范围检查，因为它们是宽容的
     // ------------------------------------------------------------------------
 
     /**
-     * Reads the byte at the given position.
+     * 读取给定位置的字节。
      *
-     * @param index The position from which the byte will be read
-     * @return The byte at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger or equal to the
-     *     size of the memory segment.
+     * @param index 要从中读取字节的位置
+     * @return 给定位置的字节
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于或等于内存段的大小，则抛出此异常
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 读取给定位置上的字节。
-     *
-     * @param index 从哪个位置读取字节
-     * @return 给定位置上的字节
-     * @throws IndexOutOfBoundsException 如果索引是负数，或者大于或等于内存段的大小，则抛出此异常
-    */
     public byte get(int index) {
-        // 将索引转换为内存中的绝对位置（通过添加基地址address）
         final long pos = address + index;
-        // 检查索引是否有效，并且是否位于分配的内存范围内
         if (index >= 0 && pos < addressLimit) {
-            // 使用UNSAFE类从内存中指定的位置读取字节
             return UNSAFE.getByte(heapMemory, pos);
         } else if (address > addressLimit) {
-            // 如果基地址大于地址限制（这通常是一个异常情况，可能表示内存段已经被释放）
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
-            // 索引无效（可能是负数或超出了内存段的大小）
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Writes the given byte into this buffer at the given position.
+     * 在给定位置写入字节。
      *
-     * @param index The index at which the byte will be written.
-     * @param b The byte value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger or equal to the
-     *     size of the memory segment.
+     * @param index 要写入字节的位置
+     * @param b     要写入的字节
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于或等于内存段的大小，则抛出此异常
      */
     public void put(int index, byte b) {
         final long pos = address + index;
         if (index >= 0 && pos < addressLimit) {
             UNSAFE.putByte(heapMemory, pos, b);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Bulk get method. Copies dst.length memory from the specified position to the destination
-     * memory.
+     * 批量读取方法。将指定位置的 dst.length 内存复制到目标内存。
      *
-     * @param index The position at which the first byte will be read.
-     * @param dst The memory into which the memory will be copied.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or too large that the
-     *     data between the index and the memory segment end is not enough to fill the destination
-     *     array.
+     * @param index 要从中读取第一个字节的位置
+     * @param dst   要复制到的目标内存
+     * @throws IndexOutOfBoundsException 如果索引为负数，或者太大，导致无法用目标数组填充数据
      */
     public void get(int index, byte[] dst) {
         get(index, dst, 0, dst.length);
     }
 
     /**
-     * Bulk put method. Copies src.length memory from the source memory into the memory segment
-     * beginning at the specified position.
+     * 批量写入方法。将源内存中的 src.length 内存从指定位置写入内存段。
      *
-     * @param index The index in the memory segment array, where the data is put.
-     * @param src The source array to copy the data from.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or too large such that
-     *     the array size exceed the amount of memory between the index and the memory segment's
-     *     end.
+     * @param index 记忆体段数组中的索引，写入数据的位置
+     * @param src   要从中复制数据的源数组
+     * @throws IndexOutOfBoundsException 如果索引为负数，或者太大，导致数组大小超过索引和内存段结束之间的内存量
      */
     public void put(int index, byte[] src) {
         put(index, src, 0, src.length);
     }
 
     /**
-     * Bulk get method. Copies length memory from the specified position to the destination memory,
-     * beginning at the given offset.
+     * 批量读取方法。从指定位置读取 length 内存，并将其复制到目标内存，从给定的偏移量开始。
      *
-     * @param index The position at which the first byte will be read.
-     * @param dst The memory into which the memory will be copied.
-     * @param offset The copying offset in the destination memory.
-     * @param length The number of bytes to be copied.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or too large that the
-     *     requested number of bytes exceed the amount of memory between the index and the memory
-     *     segment's end.
+     * @param index      要从中读取第一个字节的位置
+     * @param dst        要复制到的目标内存
+     * @param offset     目标内存中的复制偏移量
+     * @param length     要复制的字节数
+     * @throws IndexOutOfBoundsException 如果索引为负数，或者太大，导致请求的字节数超过索引和内存段末尾之间的内存量
      */
     public void get(int index, byte[] dst, int offset, int length) {
-        // check the byte array offset and length and the status
+        // 检查字节数组的偏移量和长度，以及状态
         if ((offset | length | (offset + length) | (dst.length - (offset + length))) < 0) {
             throw new IndexOutOfBoundsException();
         }
@@ -537,7 +413,7 @@ public final class MemorySegment {
             final long arrayAddress = BYTE_ARRAY_BASE_OFFSET + offset;
             UNSAFE.copyMemory(heapMemory, pos, dst, arrayAddress, length);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
             throw new IndexOutOfBoundsException(
                     String.format(
@@ -547,19 +423,16 @@ public final class MemorySegment {
     }
 
     /**
-     * Bulk put method. Copies length memory starting at position offset from the source memory into
-     * the memory segment starting at the specified index.
+     * 批量写入方法。从源内存中的指定位置开始，将 length 内存复制到内存段的指定位置。
      *
-     * @param index The position in the memory segment array, where the data is put.
-     * @param src The source array to copy the data from.
-     * @param offset The offset in the source array where the copying is started.
-     * @param length The number of bytes to copy.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or too large such that
-     *     the array portion to copy exceed the amount of memory between the index and the memory
-     *     segment's end.
+     * @param index 记忆体段数组中的索引，写入数据的位置
+     * @param src   要从中复制数据的源数组
+     * @param offset 源数组中复制开始的偏移量
+     * @param length 要复制的字节数
+     * @throws IndexOutOfBoundsException 如果索引为负数，或者太大，导致要复制的数组部分超过索引和内存段末尾之间的内存量
      */
     public void put(int index, byte[] src, int offset, int length) {
-        // check the byte array offset and length
+        // 检查字节数组的偏移量和长度
         if ((offset | length | (offset + length) | (src.length - (offset + length))) < 0) {
             throw new IndexOutOfBoundsException();
         }
@@ -570,44 +443,40 @@ public final class MemorySegment {
             final long arrayAddress = BYTE_ARRAY_BASE_OFFSET + offset;
             UNSAFE.copyMemory(src, arrayAddress, heapMemory, pos, length);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Reads one byte at the given position and returns its boolean representation.
+     * 从指定位置读取一个字节，并返回其布尔表示。
      *
-     * @param index The position from which the memory will be read.
-     * @return The boolean value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 1.
+     * @param index 要从中读取内存的位置
+     * @return 给定位置的布尔值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减一
      */
     public boolean getBoolean(int index) {
         return get(index) != 0;
     }
 
     /**
-     * Writes one byte containing the byte value into this buffer at the given position.
+     * 将字节的布尔值写入此缓冲区的指定位置。
      *
-     * @param index The position at which the memory will be written.
-     * @param value The char value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 1.
+     * @param index 要写入内存的位置
+     * @param value 要写入的 char 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减一
      */
     public void putBoolean(int index, boolean value) {
         put(index, (byte) (value ? 1 : 0));
     }
 
     /**
-     * Reads a char value from the given position, in the system's native byte order.
+     * 从指定位置读取一个字符值（系统原生字节序）。
      *
-     * @param index The position from which the memory will be read.
-     * @return The char value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取内存的位置
+     * @return 给定位置的 char 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     @SuppressWarnings("restriction")
     public char getChar(int index) {
@@ -615,25 +484,20 @@ public final class MemorySegment {
         if (index >= 0 && pos <= addressLimit - 2) {
             return UNSAFE.getChar(heapMemory, pos);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("This segment has been freed.");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Reads a character value (16 bit, 2 bytes) from the given position, in little-endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #getChar(int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #getChar(int)} is the
-     * preferable choice.
+     * 从指定位置读取一个字符值（16 位，2 字节），小端字节序。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getChar(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getChar(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The character value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的字符值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public char getCharLittleEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -644,17 +508,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a character value (16 bit, 2 bytes) from the given position, in big-endian byte order.
-     * This method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #getChar(int)}. For most cases (such as transient storage in memory or serialization
-     * for I/O and network), it suffices to know that the byte order in which the value is written
-     * is the same as the one in which it is read, and {@link #getChar(int)} is the preferable
-     * choice.
+     * 从指定位置读取一个字符值（16 位，2 字节），大端字节序。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getChar(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getChar(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The character value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的字符值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public char getCharBigEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -665,12 +525,11 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes a char value to the given position, in the system's native byte order.
+     * 将 char 值写入指定位置（系统原生字节序）。
      *
-     * @param index The position at which the memory will be written.
-     * @param value The char value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入内存的位置
+     * @param value 要写入的 char 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     @SuppressWarnings("restriction")
     public void putChar(int index, char value) {
@@ -678,25 +537,20 @@ public final class MemorySegment {
         if (index >= 0 && pos <= addressLimit - 2) {
             UNSAFE.putChar(heapMemory, pos, value);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Writes the given character (16 bit, 2 bytes) to the given position in little-endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #putChar(int, char)}. For most cases (such as transient storage in memory
-     * or serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putChar(int, char)}
-     * is the preferable choice.
+     * 以小端字节序将给定的字符（16 位，2 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putChar(int, char)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putChar(int, char)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The char value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入值的位置
+     * @param value 要写入的字符
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public void putCharLittleEndian(int index, char value) {
         if (LITTLE_ENDIAN) {
@@ -707,17 +561,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given character (16 bit, 2 bytes) to the given position in big-endian byte order.
-     * This method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #putChar(int, char)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putChar(int, char)}
-     * is the preferable choice.
+     * 以大端字节序将给定的字符（16 位，2 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putChar(int, char)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putChar(int, char)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The char value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入值的位置
+     * @param value 要写入的字符
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public void putCharBigEndian(int index, char value) {
         if (LITTLE_ENDIAN) {
@@ -728,38 +578,31 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a short integer value (16 bit, 2 bytes) from the given position, composing them into a
-     * short value according to the current byte order.
+     * 以当前字节序从指定位置读取一个 short 整数值（16 位，2 字节）。
      *
-     * @param index The position from which the memory will be read.
-     * @return The short value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取内存的位置
+     * @return 给定位置的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public short getShort(int index) {
         final long pos = address + index;
         if (index >= 0 && pos <= addressLimit - 2) {
             return UNSAFE.getShort(heapMemory, pos);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Reads a short integer value (16 bit, 2 bytes) from the given position, in little-endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #getShort(int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #getShort(int)} is
-     * the preferable choice.
+     * 以小端字节序从指定位置读取一个 short 整数值（16 位，2 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getShort(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getShort(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The short value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public short getShortLittleEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -770,17 +613,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a short integer value (16 bit, 2 bytes) from the given position, in big-endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #getShort(int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #getShort(int)} is
-     * the preferable choice.
+     * 以大端字节序从指定位置读取一个 short 整数值（16 位，2 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getShort(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getShort(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The short value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public short getShortBigEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -791,38 +630,31 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given short value into this buffer at the given position, using the native byte
-     * order of the system.
+     * 以系统原生字节序将 short 值写入指定位置。
      *
-     * @param index The position at which the value will be written.
-     * @param value The short value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入值的位置
+     * @param value 要写入的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public void putShort(int index, short value) {
         final long pos = address + index;
         if (index >= 0 && pos <= addressLimit - 2) {
             UNSAFE.putShort(heapMemory, pos, value);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Writes the given short integer value (16 bit, 2 bytes) to the given position in little-endian
-     * byte order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #putShort(int, short)}. For most cases (such as transient storage in
-     * memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #putShort(int, short)} is the preferable choice.
+     * 以小端字节序将给定的 short 整数值（16 位，2 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putShort(int, short)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putShort(int, short)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The short value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入值的位置
+     * @param value 要写入的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public void putShortLittleEndian(int index, short value) {
         if (LITTLE_ENDIAN) {
@@ -833,17 +665,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given short integer value (16 bit, 2 bytes) to the given position in big-endian
-     * byte order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #putShort(int, short)}. For most cases (such as transient storage in
-     * memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #putShort(int, short)} is the preferable choice.
+     * 以大端字节序将给定的 short 整数值（16 位，2 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putShort(int, short)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putShort(int, short)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The short value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 2.
+     * @param index 要写入值的位置
+     * @param value 要写入的 short 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减二
      */
     public void putShortBigEndian(int index, short value) {
         if (LITTLE_ENDIAN) {
@@ -854,42 +682,33 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads an int value (32bit, 4 bytes) from the given position, in the system's native byte
-     * order. This method offers the best speed for integer reading and should be used unless a
-     * specific byte order is required. In most cases, it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read (such as transient
-     * storage in memory, or serialization for I/O and network), making this method the preferable
-     * choice.
+     * 以系统原生字节序从指定位置读取一个 int 值（32 位，4 字节）。此方法提供了最佳的整数读取速度，应尽可能使用，
+     * 除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position from which the value will be read.
-     * @return The int value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public int getInt(int index) {
         final long pos = address + index;
         if (index >= 0 && pos <= addressLimit - 4) {
             return UNSAFE.getInt(heapMemory, pos);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Reads an int value (32bit, 4 bytes) from the given position, in little-endian byte order.
-     * This method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #getInt(int)}. For most cases (such as transient storage in memory or serialization
-     * for I/O and network), it suffices to know that the byte order in which the value is written
-     * is the same as the one in which it is read, and {@link #getInt(int)} is the preferable
-     * choice.
+     * 以小端字节序从指定位置读取一个 int 值（32 位，4 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getInt(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getInt(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The int value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public int getIntLittleEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -900,17 +719,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads an int value (32bit, 4 bytes) from the given position, in big-endian byte order. This
-     * method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #getInt(int)}. For most cases (such as transient storage in memory or serialization
-     * for I/O and network), it suffices to know that the byte order in which the value is written
-     * is the same as the one in which it is read, and {@link #getInt(int)} is the preferable
-     * choice.
+     * 以大端字节序从指定位置读取一个 int 值（32 位，4 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getInt(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getInt(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The int value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public int getIntBigEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -921,59 +736,33 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given int value (32bit, 4 bytes) to the given position in the system's native byte
-     * order. This method offers the best speed for integer writing and should be used unless a
-     * specific byte order is required. In most cases, it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read (such as transient
-     * storage in memory, or serialization for I/O and network), making this method the preferable
-     * choice.
+     * 以系统原生字节序将给定的 int 值（32 位，4 字节）写入指定位置。此方法提供了最佳的整数写入速度，应尽可能使用，
+     * 除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position at which the value will be written.
-     * @param value The int value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 将给定的int值（32位，4字节）以系统原生字节序写入到指定位置。
-     * 此方法提供了最佳的整数写入速度，并且应当被使用，除非需要特定的字节序。
-     * 在大多数情况下，知道值是以相同的字节序写入和读取的（如内存中的临时存储，或用于I/O和网络的序列化）
-     * 就足够了，这使得此方法成为首选。
-     *
-     * @param index 将要写入值的位置。
-     * @param value 要写入的int值。
-     * @throws IndexOutOfBoundsException 如果索引是负数，或者大于段大小减去4，则抛出此异常。
-    */
     public void putInt(int index, int value) {
-        // 将索引转换为内存中的绝对位置（通过添加基地址address）
         final long pos = address + index;
-        // 检查索引是否有效，并且是否位于分配的内存范围内（减去4字节以确保有足够的空间写入int）
         if (index >= 0 && pos <= addressLimit - 4) {
-            // 使用UNSAFE类将int值直接写入到内存中指定的位置
             UNSAFE.putInt(heapMemory, pos, value);
         } else if (address > addressLimit) {
-            // 如果基地址大于地址限制（这通常是一个异常情况，可能表示内存段已经被释放）
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
-            // 索引无效（可能是负数或超出了内存段的大小）
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Writes the given int value (32bit, 4 bytes) to the given position in little endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #putInt(int, int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putInt(int, int)} is
-     * the preferable choice.
+     * 以小端字节序将给定的 int 值（32 位，4 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putInt(int, int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putInt(int, int)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The int value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public void putIntLittleEndian(int index, int value) {
         if (LITTLE_ENDIAN) {
@@ -984,17 +773,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given int value (32bit, 4 bytes) to the given position in big endian byte order.
-     * This method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #putInt(int, int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putInt(int, int)} is
-     * the preferable choice.
+     * 以大端字节序将给定的 int 值（32 位，4 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putInt(int, int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putInt(int, int)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The int value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的 int 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public void putIntBigEndian(int index, int value) {
         if (LITTLE_ENDIAN) {
@@ -1005,42 +790,33 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a long value (64bit, 8 bytes) from the given position, in the system's native byte
-     * order. This method offers the best speed for long integer reading and should be used unless a
-     * specific byte order is required. In most cases, it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read (such as transient
-     * storage in memory, or serialization for I/O and network), making this method the preferable
-     * choice.
+     * 以系统原生字节序从指定位置读取一个 long 值（64 位，8 字节）。此方法提供了最佳的长整数读取速度，应尽可能使用，
+     * 除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public long getLong(int index) {
         final long pos = address + index;
         if (index >= 0 && pos <= addressLimit - 8) {
             return UNSAFE.getLong(heapMemory, pos);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Reads a long integer value (64bit, 8 bytes) from the given position, in little endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #getLong(int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #getLong(int)} is the
-     * preferable choice.
+     * 以小端字节序从指定位置读取一个 long 整数值（64 位，8 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getLong(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getLong(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public long getLongLittleEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -1051,17 +827,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a long integer value (64bit, 8 bytes) from the given position, in big endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #getLong(int)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #getLong(int)} is the
-     * preferable choice.
+     * 以大端字节序从指定位置读取一个 long 整数值（64 位，8 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getLong(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getLong(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public long getLongBigEndian(int index) {
         if (LITTLE_ENDIAN) {
@@ -1072,42 +844,33 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given long value (64bit, 8 bytes) to the given position in the system's native
-     * byte order. This method offers the best speed for long integer writing and should be used
-     * unless a specific byte order is required. In most cases, it suffices to know that the byte
-     * order in which the value is written is the same as the one in which it is read (such as
-     * transient storage in memory, or serialization for I/O and network), making this method the
-     * preferable choice.
+     * 以系统原生字节序将给定的 long 值（64 位，8 字节）写入指定位置。此方法提供了最佳的长整数写入速度，应尽可能使用，
+     * 除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putLong(int index, long value) {
         final long pos = address + index;
         if (index >= 0 && pos <= addressLimit - 8) {
             UNSAFE.putLong(heapMemory, pos, value);
         } else if (address > addressLimit) {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         } else {
-            // index is in fact invalid
             throw new IndexOutOfBoundsException();
         }
     }
 
     /**
-     * Writes the given long value (64bit, 8 bytes) to the given position in little endian byte
-     * order. This method's speed depends on the system's native byte order, and it is possibly
-     * slower than {@link #putLong(int, long)}. For most cases (such as transient storage in memory
-     * or serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putLong(int, long)}
-     * is the preferable choice.
+     * 以小端字节序将给定的 long 值（64 位，8 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putLong(int, long)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putLong(int, long)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putLongLittleEndian(int index, long value) {
         if (LITTLE_ENDIAN) {
@@ -1118,17 +881,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Writes the given long value (64bit, 8 bytes) to the given position in big endian byte order.
-     * This method's speed depends on the system's native byte order, and it is possibly slower than
-     * {@link #putLong(int, long)}. For most cases (such as transient storage in memory or
-     * serialization for I/O and network), it suffices to know that the byte order in which the
-     * value is written is the same as the one in which it is read, and {@link #putLong(int, long)}
-     * is the preferable choice.
+     * 以大端字节序将给定的 long 值（64 位，8 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putLong(int, long)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putLong(int, long)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的 long 值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putLongBigEndian(int index, long value) {
         if (LITTLE_ENDIAN) {
@@ -1139,211 +898,163 @@ public final class MemorySegment {
     }
 
     /**
-     * Reads a single-precision floating point value (32bit, 4 bytes) from the given position, in
-     * the system's native byte order. This method offers the best speed for float reading and
-     * should be used unless a specific byte order is required. In most cases, it suffices to know
-     * that the byte order in which the value is written is the same as the one in which it is read
-     * (such as transient storage in memory, or serialization for I/O and network), making this
-     * method the preferable choice.
+     * 以系统原生字节序从指定位置读取一个单精度浮点值（32 位，4 字节）。此方法提供了最佳的单精度浮点读取速度，
+     * 应尽可能使用，除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position from which the value will be read.
-     * @return The float value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public float getFloat(int index) {
         return Float.intBitsToFloat(getInt(index));
     }
 
     /**
-     * Reads a single-precision floating point value (32bit, 4 bytes) from the given position, in
-     * little endian byte order. This method's speed depends on the system's native byte order, and
-     * it is possibly slower than {@link #getFloat(int)}. For most cases (such as transient storage
-     * in memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #getFloat(int)} is the preferable choice.
+     * 以小端字节序从指定位置读取一个单精度浮点值（32 位，4 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getFloat(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getFloat(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public float getFloatLittleEndian(int index) {
         return Float.intBitsToFloat(getIntLittleEndian(index));
     }
 
     /**
-     * Reads a single-precision floating point value (32bit, 4 bytes) from the given position, in
-     * big endian byte order. This method's speed depends on the system's native byte order, and it
-     * is possibly slower than {@link #getFloat(int)}. For most cases (such as transient storage in
-     * memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #getFloat(int)} is the preferable choice.
+     * 以大端字节序从指定位置读取一个单精度浮点值（32 位，4 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getFloat(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getFloat(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public float getFloatBigEndian(int index) {
         return Float.intBitsToFloat(getIntBigEndian(index));
     }
 
     /**
-     * Writes the given single-precision float value (32bit, 4 bytes) to the given position in the
-     * system's native byte order. This method offers the best speed for float writing and should be
-     * used unless a specific byte order is required. In most cases, it suffices to know that the
-     * byte order in which the value is written is the same as the one in which it is read (such as
-     * transient storage in memory, or serialization for I/O and network), making this method the
-     * preferable choice.
+     * 以系统原生字节序将给定的单精度浮点值（32 位，4 字节）写入指定位置。此方法提供了最佳的单精度浮点写入速度，
+     * 应尽可能使用，除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position at which the value will be written.
-     * @param value The float value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public void putFloat(int index, float value) {
         putInt(index, Float.floatToRawIntBits(value));
     }
 
     /**
-     * Writes the given single-precision float value (32bit, 4 bytes) to the given position in
-     * little endian byte order. This method's speed depends on the system's native byte order, and
-     * it is possibly slower than {@link #putFloat(int, float)}. For most cases (such as transient
-     * storage in memory or serialization for I/O and network), it suffices to know that the byte
-     * order in which the value is written is the same as the one in which it is read, and {@link
-     * #putFloat(int, float)} is the preferable choice.
+     * 以小端字节序将给定的单精度浮点值（32 位，4 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putFloat(int, float)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putFloat(int, float)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public void putFloatLittleEndian(int index, float value) {
         putIntLittleEndian(index, Float.floatToRawIntBits(value));
     }
 
     /**
-     * Writes the given single-precision float value (32bit, 4 bytes) to the given position in big
-     * endian byte order. This method's speed depends on the system's native byte order, and it is
-     * possibly slower than {@link #putFloat(int, float)}. For most cases (such as transient storage
-     * in memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #putFloat(int, float)} is the preferable choice.
+     * 以大端字节序将给定的单精度浮点值（32 位，4 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putFloat(int, float)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putFloat(int, float)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 4.
+     * @param index 要写入值的位置
+     * @param value 要写入的单精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减四
      */
     public void putFloatBigEndian(int index, float value) {
         putIntBigEndian(index, Float.floatToRawIntBits(value));
     }
 
     /**
-     * Reads a double-precision floating point value (64bit, 8 bytes) from the given position, in
-     * the system's native byte order. This method offers the best speed for double reading and
-     * should be used unless a specific byte order is required. In most cases, it suffices to know
-     * that the byte order in which the value is written is the same as the one in which it is read
-     * (such as transient storage in memory, or serialization for I/O and network), making this
-     * method the preferable choice.
+     * 以系统原生字节序从指定位置读取一个双精度浮点值（64 位，8 字节）。此方法提供了最佳的双精度浮点读取速度，
+     * 应尽可能使用，除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position from which the value will be read.
-     * @return The double value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public double getDouble(int index) {
         return Double.longBitsToDouble(getLong(index));
     }
 
     /**
-     * Reads a double-precision floating point value (64bit, 8 bytes) from the given position, in
-     * little endian byte order. This method's speed depends on the system's native byte order, and
-     * it is possibly slower than {@link #getDouble(int)}. For most cases (such as transient storage
-     * in memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #getDouble(int)} is the preferable choice.
+     * 以小端字节序从指定位置读取一个双精度浮点值（64 位，8 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getDouble(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getDouble(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public double getDoubleLittleEndian(int index) {
         return Double.longBitsToDouble(getLongLittleEndian(index));
     }
 
     /**
-     * Reads a double-precision floating point value (64bit, 8 bytes) from the given position, in
-     * big endian byte order. This method's speed depends on the system's native byte order, and it
-     * is possibly slower than {@link #getDouble(int)}. For most cases (such as transient storage in
-     * memory or serialization for I/O and network), it suffices to know that the byte order in
-     * which the value is written is the same as the one in which it is read, and {@link
-     * #getDouble(int)} is the preferable choice.
+     * 以大端字节序从指定位置读取一个双精度浮点值（64 位，8 字节）。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #getDouble(int)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #getDouble(int)}。
      *
-     * @param index The position from which the value will be read.
-     * @return The long value at the given position.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要从中读取值的位置
+     * @return 给定位置的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public double getDoubleBigEndian(int index) {
         return Double.longBitsToDouble(getLongBigEndian(index));
     }
 
     /**
-     * Writes the given double-precision floating-point value (64bit, 8 bytes) to the given position
-     * in the system's native byte order. This method offers the best speed for double writing and
-     * should be used unless a specific byte order is required. In most cases, it suffices to know
-     * that the byte order in which the value is written is the same as the one in which it is read
-     * (such as transient storage in memory, or serialization for I/O and network), making this
-     * method the preferable choice.
+     * 以系统原生字节序将给定的双精度浮点值（64 位，8 字节）写入指定位置。此方法提供了最佳的双精度浮点写入速度，
+     * 应尽可能使用，除非需要特定的字节序。在大多数情况下，只要知道值的写入字节序和读取字节序相同就足够了（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 因此应优先选择此方法。
      *
-     * @param index The position at which the memory will be written.
-     * @param value The double value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putDouble(int index, double value) {
         putLong(index, Double.doubleToRawLongBits(value));
     }
 
     /**
-     * Writes the given double-precision floating-point value (64bit, 8 bytes) to the given position
-     * in little endian byte order. This method's speed depends on the system's native byte order,
-     * and it is possibly slower than {@link #putDouble(int, double)}. For most cases (such as
-     * transient storage in memory or serialization for I/O and network), it suffices to know that
-     * the byte order in which the value is written is the same as the one in which it is read, and
-     * {@link #putDouble(int, double)} is the preferable choice.
+     * 以小端字节序将给定的双精度浮点值（64 位，8 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putDouble(int, double)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putDouble(int, double)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putDoubleLittleEndian(int index, double value) {
         putLongLittleEndian(index, Double.doubleToRawLongBits(value));
     }
 
     /**
-     * Writes the given double-precision floating-point value (64bit, 8 bytes) to the given position
-     * in big endian byte order. This method's speed depends on the system's native byte order, and
-     * it is possibly slower than {@link #putDouble(int, double)}. For most cases (such as transient
-     * storage in memory or serialization for I/O and network), it suffices to know that the byte
-     * order in which the value is written is the same as the one in which it is read, and {@link
-     * #putDouble(int, double)} is the preferable choice.
+     * 以大端字节序将给定的双精度浮点值（64 位，8 字节）写入指定位置。此方法的速度取决于系统的原生字节序，
+     * 并可能比 {@link #putDouble(int, double)} 慢。对于大多数情况（例如内存中的临时存储或用于 I/O 和网络的序列化），
+     * 只要知道值的写入字节序和读取字节序相同就足够了，因此应该选择 {@link #putDouble(int, double)}。
      *
-     * @param index The position at which the value will be written.
-     * @param value The long value to be written.
-     * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the
-     *     segment size minus 8.
+     * @param index 要写入值的位置
+     * @param value 要写入的双精度浮点值
+     * @throws IndexOutOfBoundsException 如果索引为负数，或大于段大小减八
      */
     public void putDoubleBigEndian(int index, double value) {
         putLongBigEndian(index, Double.doubleToRawLongBits(value));
     }
 
     // -------------------------------------------------------------------------
-    //                     Bulk Read and Write Methods
+    // Bulk Read and Write Methods
     // -------------------------------------------------------------------------
 
     public void get(DataOutput out, int offset, int length) throws IOException {
@@ -1364,19 +1075,17 @@ public final class MemorySegment {
                 }
             }
         } else {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         }
     }
 
     /**
-     * Bulk put method. Copies length memory from the given DataInput to the memory starting at
-     * position offset.
+     * 批量写入方法。将给定 DataInput 的 length 内存从位置 offset 写入内存段。
      *
-     * @param in The DataInput to get the data from.
-     * @param offset The position in the memory segment to copy the chunk to.
-     * @param length The number of bytes to get.
-     * @throws IOException Thrown, if the DataInput encountered a problem upon reading, such as an
-     *     End-Of-File.
+     * @param in   数据输入的来源。
+     * @param offset 内存段中复制块的目标位置。
+     * @param length 要读取的字节数。
+     * @throws IOException 如果 DataInput 在读取时遇到问题，例如文件结束符。
      */
     public void put(DataInput in, int offset, int length) throws IOException {
         if (address <= addressLimit) {
@@ -1395,28 +1104,23 @@ public final class MemorySegment {
                 }
             }
         } else {
-            throw new IllegalStateException("segment has been freed");
+            throw new IllegalStateException("segment 已被释放");
         }
     }
 
     /**
-     * Bulk get method. Copies {@code numBytes} bytes from this memory segment, starting at position
-     * {@code offset} to the target {@code ByteBuffer}. The bytes will be put into the target buffer
-     * starting at the buffer's current position. If this method attempts to write more bytes than
-     * the target byte buffer has remaining (with respect to {@link ByteBuffer#remaining()}), this
-     * method will cause a {@link java.nio.BufferOverflowException}.
+     * 批量读取方法。从该内存段的 offset 位置开始，复制 numBytes 字节到目标 ByteBuffer。字节将被放入目标缓冲区，
+     * 从缓冲区的当前位置开始。如果此方法尝试将多于目标 ByteBuffer 剩余字节数（相对于 {@link ByteBuffer#remaining()}）的字节写入，
+     * 此方法将导致 java.nio.BufferOverflowException。
      *
-     * @param offset The position where the bytes are started to be read from in this memory
-     *     segment.
-     * @param target The ByteBuffer to copy the bytes to.
-     * @param numBytes The number of bytes to copy.
-     * @throws IndexOutOfBoundsException If the offset is invalid, or this segment does not contain
-     *     the given number of bytes (starting from offset), or the target byte buffer does not have
-     *     enough space for the bytes.
-     * @throws ReadOnlyBufferException If the target buffer is read-only.
+     * @param offset     在内存段中开始读取字节的位置。
+     * @param target     要复制字节到的 ByteBuffer。
+     * @param numBytes   要复制的字节数。
+     * @throws IndexOutOfBoundsException 如果偏移量无效，或者该段不包含从偏移量开始的指定字节数，或者目标 ByteBuffer 没有足够的空间容纳字节。
+     * @throws ReadOnlyBufferException   如果目标缓冲区是只读的。
      */
     public void get(int offset, ByteBuffer target, int numBytes) {
-        // check the byte array offset and length
+        // 检查字节数组的偏移量和长度
         if ((offset | numBytes | (offset + numBytes)) < 0) {
             throw new IndexOutOfBoundsException();
         }
@@ -1432,7 +1136,7 @@ public final class MemorySegment {
         }
 
         if (target.isDirect()) {
-            // copy to the target memory directly
+            // 直接复制到目标内存
             final long targetPointer = getByteBufferAddress(target) + targetOffset;
             final long sourcePointer = address + offset;
 
@@ -1440,42 +1144,35 @@ public final class MemorySegment {
                 UNSAFE.copyMemory(heapMemory, sourcePointer, null, targetPointer, numBytes);
                 target.position(targetOffset + numBytes);
             } else if (address > addressLimit) {
-                throw new IllegalStateException("segment has been freed");
+                throw new IllegalStateException("segment 已被释放");
             } else {
                 throw new IndexOutOfBoundsException();
             }
         } else if (target.hasArray()) {
-            // move directly into the byte array
+            // 直接移动到字节数组中
             get(offset, target.array(), targetOffset + target.arrayOffset(), numBytes);
 
-            // this must be after the get() call to ensue that the byte buffer is not
-            // modified in case the call fails
+            // 必须在 get() 调用之后，以确保在调用失败时字节缓冲区不会被修改
             target.position(targetOffset + numBytes);
         } else {
-            // other types of byte buffers
+            // 其他类型的 ByteBuffer
             throw new IllegalArgumentException(
-                    "The target buffer is not direct, and has no array.");
+                    "目标缓冲区不是直接的，也没有数组。");
         }
     }
 
     /**
-     * Bulk put method. Copies {@code numBytes} bytes from the given {@code ByteBuffer}, into this
-     * memory segment. The bytes will be read from the target buffer starting at the buffer's
-     * current position, and will be written to this memory segment starting at {@code offset}. If
-     * this method attempts to read more bytes than the target byte buffer has remaining (with
-     * respect to {@link ByteBuffer#remaining()}), this method will cause a {@link
-     * java.nio.BufferUnderflowException}.
+     * 批量写入方法。从给定的 ByteBuffer 中复制 numBytes 字节到此内存段。字节将从目标缓冲区的当前位置开始读取，
+     * 并写入到该内存段的 offset 位置。如果此方法尝试读取多于目标 ByteBuffer 剩余字节数（相对于 {@link ByteBuffer#remaining()}）的字节，
+     * 此方法将导致 java.nio.BufferUnderflowException。
      *
-     * @param offset The position where the bytes are started to be written to in this memory
-     *     segment.
-     * @param source The ByteBuffer to copy the bytes from.
-     * @param numBytes The number of bytes to copy.
-     * @throws IndexOutOfBoundsException If the offset is invalid, or the source buffer does not
-     *     contain the given number of bytes, or this segment does not have enough space for the
-     *     bytes (counting from offset).
+     * @param offset     在该内存段中开始写入字节的位置。
+     * @param source     要从中复制字节的 ByteBuffer。
+     * @param numBytes   要复制的字节数。
+     * @throws IndexOutOfBoundsException 如果偏移量无效，或者源缓冲区不包含指定的字节数，或者该段没有足够的空间来容纳从 offset 开始的字节。
      */
     public void put(int offset, ByteBuffer source, int numBytes) {
-        // check the byte array offset and length
+        // 检查字节数组的偏移量和长度
         if ((offset | numBytes | (offset + numBytes)) < 0) {
             throw new IndexOutOfBoundsException();
         }
@@ -1488,7 +1185,7 @@ public final class MemorySegment {
         }
 
         if (source.isDirect()) {
-            // copy to the target memory directly
+            // 直接复制到目标内存
             final long sourcePointer = getByteBufferAddress(source) + sourceOffset;
             final long targetPointer = address + offset;
 
@@ -1496,19 +1193,18 @@ public final class MemorySegment {
                 UNSAFE.copyMemory(null, sourcePointer, heapMemory, targetPointer, numBytes);
                 source.position(sourceOffset + numBytes);
             } else if (address > addressLimit) {
-                throw new IllegalStateException("segment has been freed");
+                throw new IllegalStateException("segment 已被释放");
             } else {
                 throw new IndexOutOfBoundsException();
             }
         } else if (source.hasArray()) {
-            // move directly into the byte array
+            // 直接移动到字节数组中
             put(offset, source.array(), sourceOffset + source.arrayOffset(), numBytes);
 
-            // this must be after the get() call to ensue that the byte buffer is not
-            // modified in case the call fails
+            // 必须在 get() 调用之后，以确保在调用失败时字节缓冲区不会被修改
             source.position(sourceOffset + numBytes);
         } else {
-            // other types of byte buffers
+            // 其他类型的 ByteBuffer
             for (int i = 0; i < numBytes; i++) {
                 put(offset++, source.get());
             }
@@ -1516,18 +1212,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Bulk copy method. Copies {@code numBytes} bytes from this memory segment, starting at
-     * position {@code offset} to the target memory segment. The bytes will be put into the target
-     * segment starting at position {@code targetOffset}.
+     * 批量复制方法。从该内存段的 offset 位置开始，复制 numBytes 字节到目标内存段。字节将被放入目标段的 targetOffset 位置。
      *
-     * @param offset The position where the bytes are started to be read from in this memory
-     *     segment.
-     * @param target The memory segment to copy the bytes to.
-     * @param targetOffset The position in the target memory segment to copy the chunk to.
-     * @param numBytes The number of bytes to copy.
-     * @throws IndexOutOfBoundsException If either of the offsets is invalid, or the source segment
-     *     does not contain the given number of bytes (starting from offset), or the target segment
-     *     does not have enough space for the bytes (counting from targetOffset).
+     * @param offset         在该内存段中开始读取字节的位置。
+     * @param target         要复制字节到的内存段。
+     * @param targetOffset   目标内存段复制块的目标位置。
+     * @param numBytes       要复制的字节数。
+     * @throws IndexOutOfBoundsException 如果任何一个偏移量无效，或者源段不包含从 offset 开始的指定字节数，或者目标段没有足够的空间来容纳从 targetOffset 开始的字节。
      */
     public void copyTo(int offset, MemorySegment target, int targetOffset, int numBytes) {
         final byte[] thisHeapRef = this.heapMemory;
@@ -1540,9 +1231,9 @@ public final class MemorySegment {
                 && otherPointer <= target.addressLimit - numBytes) {
             UNSAFE.copyMemory(thisHeapRef, thisPointer, otherHeapRef, otherPointer, numBytes);
         } else if (this.address > this.addressLimit) {
-            throw new IllegalStateException("this memory segment has been freed.");
+            throw new IllegalStateException("此内存段已被释放。");
         } else if (target.address > target.addressLimit) {
-            throw new IllegalStateException("target memory segment has been freed.");
+            throw new IllegalStateException("目标内存段已被释放。");
         } else {
             throw new IndexOutOfBoundsException(
                     String.format(
@@ -1552,16 +1243,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Bulk copy method. Copies {@code numBytes} bytes to target unsafe object and pointer. NOTE:
-     * This is an unsafe method, no check here, please be careful.
+     * 批量复制方法。将 numBytes 字节复制到目标不安全的对象和指针。注意：这是一个不安全的方法，此处没有检查，因此请小心。
      *
-     * @param offset The position where the bytes are started to be read from in this memory
-     *     segment.
-     * @param target The unsafe memory to copy the bytes to.
-     * @param targetPointer The position in the target unsafe memory to copy the chunk to.
-     * @param numBytes The number of bytes to copy.
-     * @throws IndexOutOfBoundsException If the source segment does not contain the given number of
-     *     bytes (starting from offset).
+     * @param offset         在该内存段中开始读取字节的位置。
+     * @param target         要复制字节到的不安全内存。
+     * @param targetPointer  目标不安全内存复制块的目标位置。
+     * @param numBytes       要复制的字节数。
+     * @throws IndexOutOfBoundsException 如果源段不包含从 offset 开始的指定字节数。
      */
     public void copyToUnsafe(int offset, Object target, int targetPointer, int numBytes) {
         final long thisPointer = this.address + offset;
@@ -1574,15 +1262,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Bulk copy method. Copies {@code numBytes} bytes from source unsafe object and pointer. NOTE:
-     * This is an unsafe method, no check here, please be careful.
+     * 批量复制方法。从源不安全对象和指针复制 numBytes 字节。注意：这是一个不安全的方法，此处没有检查，因此请小心。
      *
-     * @param offset The position where the bytes are started to be write in this memory segment.
-     * @param source The unsafe memory to copy the bytes from.
-     * @param sourcePointer The position in the source unsafe memory to copy the chunk from.
-     * @param numBytes The number of bytes to copy.
-     * @throws IndexOutOfBoundsException If this segment can not contain the given number of bytes
-     *     (starting from offset).
+     * @param offset         在该内存段中开始写入字节的位置。
+     * @param source         要从中复制字节的不安全内存。
+     * @param sourcePointer  源不安全内存复制块的来源位置。
+     * @param numBytes       要复制的字节数。
+     * @throws IndexOutOfBoundsException 如果该段无法容纳从 offset 开始的指定字节数。
      */
     public void copyFromUnsafe(int offset, Object source, int sourcePointer, int numBytes) {
         final long thisPointer = this.address + offset;
@@ -1595,17 +1281,17 @@ public final class MemorySegment {
     }
 
     // -------------------------------------------------------------------------
-    //                      Comparisons & Swapping
+    // Comparisons & Swapping
     // -------------------------------------------------------------------------
 
     /**
-     * Compares two memory segment regions.
+     * 比较两个内存段区域。
      *
-     * @param seg2 Segment to compare this segment with
-     * @param offset1 Offset of this segment to start comparing
-     * @param offset2 Offset of seg2 to start comparing
-     * @param len Length of the compared memory region
-     * @return 0 if equal, -1 if seg1 &lt; seg2, 1 otherwise
+     * @param seg2   与之比较的段
+     * @param offset1     该段的起始比较偏移量
+     * @param offset2     seg2 的起始比较偏移量
+     * @param len 需要比较的内存区域的长度
+     * @return 如果相等则为 0，如果 seg1 < seg2 则为 -1，否则为 1
      */
     public int compare(MemorySegment seg2, int offset1, int offset2, int len) {
         while (len >= 8) {
@@ -1635,14 +1321,14 @@ public final class MemorySegment {
     }
 
     /**
-     * Compares two memory segment regions with different length.
+     * 比较具有不同长度的两个内存段区域。
      *
-     * @param seg2 Segment to compare this segment with
-     * @param offset1 Offset of this segment to start comparing
-     * @param offset2 Offset of seg2 to start comparing
-     * @param len1 Length of this memory region to compare
-     * @param len2 Length of seg2 to compare
-     * @return 0 if equal, -1 if seg1 &lt; seg2, 1 otherwise
+     * @param seg2   与之比较的段
+     * @param offset1     该段的起始比较偏移量
+     * @param offset2     seg2 的起始比较偏移量
+     * @param len1 该内存区域的长度
+     * @param len2 seg2 的长度
+     * @return 如果相等则为 0，如果 seg1 < seg2 则为 -1，否则为 1
      */
     public int compare(MemorySegment seg2, int offset1, int offset2, int len1, int len2) {
         final int minLength = Math.min(len1, len2);
@@ -1651,13 +1337,13 @@ public final class MemorySegment {
     }
 
     /**
-     * Swaps bytes between two memory segments, using the given auxiliary buffer.
+     * 使用给定的辅助缓冲区交换两个内存段的字节。
      *
-     * @param tempBuffer The auxiliary buffer in which to put data during triangle swap.
-     * @param seg2 Segment to swap bytes with
-     * @param offset1 Offset of this segment to start swapping
-     * @param offset2 Offset of seg2 to start swapping
-     * @param len Length of the swapped memory region
+     * @param tempBuffer   在三角交换中放置数据的辅助缓冲区。
+     * @param seg2         要交换字节的段
+     * @param offset1     该段的起始交换偏移量
+     * @param offset2     seg2 的起始交换偏移量
+     * @param len 需要交换的内存区域的长度
      */
     public void swapBytes(
             byte[] tempBuffer, MemorySegment seg2, int offset1, int offset2, int len) {
@@ -1678,13 +1364,13 @@ public final class MemorySegment {
                         tempBuffer, BYTE_ARRAY_BASE_OFFSET, seg2.heapMemory, otherPos, len);
                 return;
             } else if (this.address > this.addressLimit) {
-                throw new IllegalStateException("this memory segment has been freed.");
+                throw new IllegalStateException("该内存段已被释放。");
             } else if (seg2.address > seg2.addressLimit) {
-                throw new IllegalStateException("other memory segment has been freed.");
+                throw new IllegalStateException("其他内存段已被释放。");
             }
         }
 
-        // index is in fact invalid
+        // 偏移量无效
         throw new IndexOutOfBoundsException(
                 String.format(
                         "offset1=%d, offset2=%d, len=%d, bufferSize=%d, address1=%d, address2=%d",
@@ -1692,19 +1378,19 @@ public final class MemorySegment {
     }
 
     /**
-     * Equals two memory segment regions.
+     * 比较两个内存段区域。
      *
-     * @param seg2 Segment to equal this segment with
-     * @param offset1 Offset of this segment to start equaling
-     * @param offset2 Offset of seg2 to start equaling
-     * @param length Length of the equaled memory region
-     * @return true if equal, false otherwise
+     * @param seg2   与此段比较的段
+     * @param offset1     该段的起始比较偏移量
+     * @param offset2     seg2 的起始比较偏移量
+     * @param length 需要比较的内存区域的长度
+     * @return 如果相等则为 true，否则为 false
      */
     public boolean equalTo(MemorySegment seg2, int offset1, int offset2, int length) {
         int i = 0;
 
-        // we assume unaligned accesses are supported.
-        // Compare 8 bytes at a time.
+        // 我们假设支持未对齐的访问。
+        // 每次比较 8 个字节。
         while (i <= length - 8) {
             if (getLong(offset1 + i) != seg2.getLong(offset2 + i)) {
                 return false;
@@ -1712,7 +1398,7 @@ public final class MemorySegment {
             i += 8;
         }
 
-        // cover the last (length % 8) elements.
+        // 处理剩下的 (length % 8) 字节。
         while (i < length) {
             if (get(offset1 + i) != seg2.get(offset2 + i)) {
                 return false;
@@ -1724,39 +1410,32 @@ public final class MemorySegment {
     }
 
     /**
-     * Get the heap byte array object.
+     * 获取堆字节数组对象。
      *
-     * @return Return non-null if the memory is on the heap, and return null if the memory if off
-     *     the heap.
+     * @return 如果内存位于堆内，则返回非 null，否则返回 null。
      */
     public byte[] getHeapMemory() {
         return heapMemory;
     }
 
     /**
-     * Applies the given process function on a {@link ByteBuffer} that represents this entire
-     * segment.
+     * 将表示整个段的 ByteBuffer 应用于给定的处理函数。
      *
-     * <p>Note: The {@link ByteBuffer} passed into the process function is temporary and could
-     * become invalid after the processing. Thus, the process function should not try to keep any
-     * reference of the {@link ByteBuffer}.
+     * <p>注意：传递给处理函数的 ByteBuffer 是临时的，并且在处理之后可能会变得无效。因此，处理函数不应该尝试保留 ByteBuffer 的任何引用。
      *
-     * @param processFunction to be applied to the segment as {@link ByteBuffer}.
-     * @return the value that the process function returns.
+     * @param processFunction 应用到段的 ByteBuffer 的处理函数。
+     * @return 处理函数返回的值。
      */
     public <T> T processAsByteBuffer(Function<ByteBuffer, T> processFunction) {
         return Preconditions.checkNotNull(processFunction).apply(wrapInternal(0, size));
     }
 
     /**
-     * Supplies a {@link ByteBuffer} that represents this entire segment to the given process
-     * consumer.
+     * 将表示整个段的 ByteBuffer 提供给给定的处理消费者。
      *
-     * <p>Note: The {@link ByteBuffer} passed into the process consumer is temporary and could
-     * become invalid after the processing. Thus, the process consumer should not try to keep any
-     * reference of the {@link ByteBuffer}.
+     * <p>注意：传递给处理消费者的 ByteBuffer 是临时的，并且在处理之后可能会变得无效。因此，处理消费者不应该尝试保留 ByteBuffer 的任何引用。
      *
-     * @param processConsumer to accept the segment as {@link ByteBuffer}.
+     * @param processConsumer 要接受段的 ByteBuffer 的处理消费者。
      */
     public void processAsByteBuffer(Consumer<ByteBuffer> processConsumer) {
         Preconditions.checkNotNull(processConsumer).accept(wrapInternal(0, size));

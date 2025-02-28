@@ -35,20 +35,40 @@ import java.util.ArrayList;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 
-/** In memory sort buffer for binary row. */
+/**
+ * 内存中的二进制行排序缓冲区。
+ */
 public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
 
     private static final int MIN_REQUIRED_BUFFERS = 3;
 
+    // 输入记录的序列化器
     private final AbstractRowDataSerializer<RowData> inputSerializer;
+
+    // 用于存储记录缓冲区段的列表
     private final ArrayList<MemorySegment> recordBufferSegments;
+
+    // 用于收集记录到缓冲区段中的输出视图
     private final SimpleCollectingOutputView recordCollector;
+
+    // 总共可用的缓冲区数
     private final int totalNumBuffers;
 
+    // 当前数据缓冲区的偏移量
     private long currentDataBufferOffset;
+
+    // 排序索引占用的字节数
     private long sortIndexBytes;
 
-    /** Create a memory sorter in `insert` way. */
+    /**
+     * 创建以插入方式工作的内存排序器。
+     *
+     * @param normalizedKeyComputer 规范化键计算器
+     * @param inputSerializer 输入记录的序列化器
+     * @param serializer 行数据序列化器
+     * @param comparator 记录比较器
+     * @param memoryPool 内存池
+     */
     public static BinaryInMemorySortBuffer createBuffer(
             NormalizedKeyComputer normalizedKeyComputer,
             AbstractRowDataSerializer<RowData> inputSerializer,
@@ -86,32 +106,32 @@ public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
         this.totalNumBuffers = totalNumBuffers;
     }
 
-    // -------------------------------------------------------------------------
-    // Memory Segment
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
+    // 内存段
+    // -----------------------------------------------------------------------------
 
     /**
-     * Resets the sort buffer back to the state where it is empty. All contained data is discarded.
+     * 将排序缓冲区重置为空状态。所有包含的数据将被丢弃。
      */
     public void reset() {
 
-        // reset all offsets
+        // 重置所有偏移量
         this.numRecords = 0;
         this.currentSortIndexOffset = 0;
         this.currentDataBufferOffset = 0;
         this.sortIndexBytes = 0;
 
-        // return all memory
+        // 返回所有内存段到内存池
         returnToSegmentPool();
 
-        // grab first buffers
+        // 获取第一个缓冲区段
         this.currentSortIndexSegment = nextMemorySegment();
         this.sortIndex.add(this.currentSortIndexSegment);
         this.recordCollector.reset();
     }
 
     public void returnToSegmentPool() {
-        // return all memory
+        // 将所有内存段返回到内存池
         this.memorySegmentPool.returnAll(this.sortIndex);
         this.memorySegmentPool.returnAll(this.recordBufferSegments);
         this.sortIndex.clear();
@@ -119,9 +139,9 @@ public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
     }
 
     /**
-     * Checks whether the buffer is empty.
+     * 检查缓冲区是否为空。
      *
-     * @return True, if no record is contained, false otherwise.
+     * @return 如果没有记录，则返回 true；否则返回 false。
      */
     public boolean isEmpty() {
         return this.numRecords == 0;
@@ -140,21 +160,19 @@ public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
     }
 
     /**
-     * Writes a given record to this sort buffer. The written record will be appended and take the
-     * last logical position.
+     * 将给定记录写入排序缓冲区。写入的记录将作为最后一个逻辑位置。
      *
-     * @param record The record to be written.
-     * @return True, if the record was successfully written, false, if the sort buffer was full.
-     * @throws IOException Thrown, if an error occurred while serializing the record into the
-     *     buffers.
+     * @param record 要写入的记录
+     * @return 如果记录成功写入，则返回 true；如果排序缓冲区已满，则返回 false。
+     * @throws IOException 如果在将记录序列化到缓冲区时发生错误。
      */
     public boolean write(RowData record) throws IOException {
-        // check whether we need a new memory segment for the sort index
+        // 检查是否需要新的内存段来存储排序索引
         if (!checkNextIndexOffset()) {
             return false;
         }
 
-        // serialize the record into the data buffers
+        // 将记录序列化到数据缓冲区段中
         int skip;
         try {
             skip = this.inputSerializer.serializeToPages(record, this.recordCollector);
@@ -172,18 +190,17 @@ public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
         return true;
     }
 
-    private BinaryRowData getRecordFromBuffer(BinaryRowData reuse, long pointer)
-            throws IOException {
+    private BinaryRowData getRecordFromBuffer(BinaryRowData reuse, long pointer) throws IOException {
         this.recordBuffer.setReadPosition(pointer);
         return this.serializer.mapFromPages(reuse, this.recordBuffer);
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     /**
-     * Gets an iterator over all records in this buffer in their logical order.
+     * 获取一个在缓冲区记录的逻辑顺序上的迭代器。
      *
-     * @return An iterator returning the records in their logical order.
+     * @return 返回记录的逻辑顺序的迭代器。
      */
     public MutableObjectIterator<BinaryRowData> getIterator() {
         return new MutableObjectIterator<BinaryRowData>() {
@@ -219,7 +236,7 @@ public final class BinaryInMemorySortBuffer extends BinaryIndexedSortable {
 
             @Override
             public BinaryRowData next() {
-                throw new RuntimeException("Not support!");
+                throw new RuntimeException("Not supported!");
             }
         };
     }

@@ -29,23 +29,32 @@ import java.util.List;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 
-/** Binary version of {@link MergeIterator}. Use {@link RecordComparator} to compare record. */
+/**
+ * `MergeIterator` 的二进制版本。使用 `RecordComparator` 比较记录。
+ */
 public class BinaryMergeIterator<Entry> implements MutableObjectIterator<Entry> {
 
-    // heap over the head elements of the stream
-    private final PartialOrderPriorityQueue<HeadStream<Entry>> heap;
-    private HeadStream<Entry> currHead;
+    // 使用头部元素构建堆
+    private final PartialOrderPriorityQueue<HeadStream<Entry>> heap; // 优先队列
+    private HeadStream<Entry> currHead; // 当前头部
 
+    /**
+     * 构造函数，初始化合并迭代器。
+     */
     public BinaryMergeIterator(
-            List<MutableObjectIterator<Entry>> iterators,
-            List<Entry> reusableEntries,
-            Comparator<Entry> comparator)
-            throws IOException {
-        checkArgument(iterators.size() == reusableEntries.size());
-        this.heap =
-                new PartialOrderPriorityQueue<>(
-                        (o1, o2) -> comparator.compare(o1.getHead(), o2.getHead()),
-                        iterators.size());
+            List<MutableObjectIterator<Entry>> iterators, // 输入迭代器列表
+            List<Entry> reusableEntries, // 可复用的条目列表
+            Comparator<Entry> comparator // 比较器
+    ) throws IOException {
+        checkArgument(iterators.size() == reusableEntries.size()); // 检查输入迭代器和可复用条目数量是否一致
+
+        // 初始化优先队列
+        this.heap = new PartialOrderPriorityQueue<>( // 创建优先队列
+                (o1, o2) -> comparator.compare(o1.getHead(), o2.getHead()), // 比较队列中的元素
+                iterators.size() // 队列的初始容量
+        );
+
+        // 为每个输入迭代器创建 HeadStream 并添加到优先队列
         for (int i = 0; i < iterators.size(); i++) {
             this.heap.add(new HeadStream<>(iterators.get(i), reusableEntries.get(i)));
         }
@@ -53,47 +62,46 @@ public class BinaryMergeIterator<Entry> implements MutableObjectIterator<Entry> 
 
     @Override
     public Entry next(Entry reuse) throws IOException {
-        // Ignore reuse, because each HeadStream has its own reuse BinaryRowData.
+        // 忽略reuse参数，因为每个HeadStream有自己的可复用BinaryRowData
         return next();
     }
 
     @Override
     public Entry next() throws IOException {
-        if (currHead != null) {
-            if (!currHead.nextHead()) {
-                this.heap.poll();
+        if (currHead != null) { // 如果当前头部不为空
+            if (!currHead.nextHead()) { // 尝试获取下一个头部
+                this.heap.poll(); // 移除当前头部
             } else {
-                this.heap.adjustTop();
+                this.heap.adjustTop(); // 调整优先队列的顶部元素
             }
         }
 
-        if (this.heap.size() > 0) {
-            currHead = this.heap.peek();
-            return currHead.getHead();
+        if (this.heap.size() > 0) { // 如果优先队列不为空
+            currHead = this.heap.peek(); // 获取当前最小的HeadStream
+            return currHead.getHead(); // 返回当前头部
         } else {
-            return null;
+            return null; // 返回null表示没有更多数据
         }
     }
 
-    private static final class HeadStream<Entry> {
-
-        private final MutableObjectIterator<Entry> iterator;
-        private Entry head;
+    private static final class HeadStream<Entry> { // 内部类
+        private final MutableObjectIterator<Entry> iterator; // 输入迭代器
+        private Entry head; // 当前头部
 
         private HeadStream(MutableObjectIterator<Entry> iterator, Entry head) throws IOException {
-            this.iterator = iterator;
-            this.head = head;
-            if (!nextHead()) {
-                throw new IllegalStateException();
+            this.iterator = iterator; // 初始化输入迭代器
+            this.head = head; // 初始化当前头部
+            if (!nextHead()) { // 初始化头部
+                throw new IllegalStateException("无法初始化HeadStream");
             }
         }
 
-        private Entry getHead() {
+        private Entry getHead() { // 获取当前头部
             return this.head;
         }
 
-        private boolean nextHead() throws IOException {
-            return (this.head = this.iterator.next(head)) != null;
+        private boolean nextHead() throws IOException { // 获取下一个头部
+            return (this.head = this.iterator.next(head)) != null; // 返回是否成功获取到下一个元素
         }
     }
 }
