@@ -95,6 +95,8 @@ import java.util.stream.IntStream;
 public abstract class CommonExecSink extends ExecNodeBase<Object>
         implements MultipleTransformationTranslator<Object> {
 
+    // 静态常量定义，标识不同的 Transformation 类型
+    // 这些常量用于区分在数据处理过程中生成的不同类型的 Transformation
     public static final String CONSTRAINT_VALIDATOR_TRANSFORMATION = "constraint-validator";
     public static final String PARTITIONER_TRANSFORMATION = "partitioner";
     public static final String UPSERT_MATERIALIZE_TRANSFORMATION = "upsert-materialize";
@@ -102,15 +104,40 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
     public static final String ROW_KIND_SETTER = "row-kind-setter";
     public static final String SINK_TRANSFORMATION = "sink";
 
+    // 静态常量定义，标识表汇规格字段名称
+    // 用于 JSON 反序列化时识别表汇规格
     public static final String FIELD_NAME_DYNAMIC_TABLE_SINK = "dynamicTableSink";
 
+    // 使用 JSON 注解声明的表汇规格字段
+    // 用于 JSON 反序列化，存储表汇的相关配置信息
     @JsonProperty(FIELD_NAME_DYNAMIC_TABLE_SINK)
     protected final DynamicTableSinkSpec tableSinkSpec;
 
+    // 输入数据的变更日志模式
+    // 表示输入数据包含哪种类型的变更（插入、更新、删除等）
     private final ChangelogMode inputChangelogMode;
+
+    // 是否输入数据是有限的（有界）
+    // 有界数据表示数据流有明确的开始和结束
     private final boolean isBounded;
+
+    // 标记是否显式配置了数据汇的并行度
+    // 用于控制数据汇操作符的并行度配置逻辑
     protected boolean sinkParallelismConfigured;
 
+    /**
+     * 构造函数，用于初始化 CommonExecSink。
+     *
+     * @param id                      节点的唯一标识符
+     * @param context                 执行节点的上下文对象
+     * @param persistedConfig         保存的配置信息
+     * @param tableSinkSpec           表汇规格，定义了数据汇的行为
+     * @param inputChangelogMode      输入数据的变更日志模式
+     * @param isBounded               是否输入数据是有限的（有界）
+     * @param inputProperties         输入的属性列表
+     * @param outputType              输出的数据类型
+     * @param description             节点的描述信息
+     */
     protected CommonExecSink(
             int id,
             ExecNodeContext context,
@@ -121,35 +148,48 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             List<InputProperty> inputProperties,
             LogicalType outputType,
             String description) {
+        // 调用父类的构造函数
         super(id, context, persistedConfig, inputProperties, outputType, description);
+        // 初始化表汇规格
         this.tableSinkSpec = tableSinkSpec;
+        // 初始化输入变更日志模式
         this.inputChangelogMode = inputChangelogMode;
+        // 初始化是否有限标识
         this.isBounded = isBounded;
     }
 
+    /**
+     * 获取简化的节点名称，通常基于表汇的身份标识。
+     *
+     * @return 表汇的身份标识
+     */
     @Override
     public String getSimplifiedName() {
+        // 从表汇规格中获取解析后的表的标识符
         return tableSinkSpec.getContextResolvedTable().getIdentifier().getObjectName();
     }
 
+    /**
+     * 获取表汇规格，用于生成数据汇的 Transformation。
+     *
+     * @return 表汇规格对象
+     */
     public DynamicTableSinkSpec getTableSinkSpec() {
         return tableSinkSpec;
     }
 
     /**
-     * @授课老师: 码界探索
-     * @微信: 252810631
-     * @版权所有: 请尊重劳动成果
-     * 创建一个数据汇的Transformation对象。
+     * 创建一个数据汇的 Transformation，用于将数据写入外部系统。
      *
-     * @param streamExecEnv Flink的流执行环境，用于配置和执行流处理作业。
-     * @param config 执行节点的配置信息。
-     * @param classLoader 类加载器，用于加载用户定义的函数或类。
-     * @param inputTransform 输入的Transformation对象，表示数据源或之前处理步骤的输出。
-     * @param tableSink 动态表汇，定义了如何将数据写入外部系统。
-     * @param rowtimeFieldIndex 行时间字段的索引，在输入数据中的位置，用于时间相关的处理。
-     * @param upsertMaterialize 是否将更新（upsert）操作物化（转换为插入或删除操作），以支持某些不支持直接更新操作的数据存储。
-     * @param inputUpsertKey 输入数据中用于更新操作的键的索引数组。
+     * @param streamExecEnv Flink 的流执行环境，用于配置和执行流处理作业
+     * @param config        执行节点的配置信息
+     * @param classLoader   类加载器，用于加载用户定义的函数或类
+     * @param inputTransform 输入的 Transformation，表示数据源或之前处理步骤的输出
+     * @param tableSink     动态表汇，定义了如何将数据写入外部系统
+     * @param rowtimeFieldIndex 行时间字段的索引，用于时间相关的处理
+     * @param upsertMaterialize 是否将更新（upsert）操作物化（转换为插入或删除操作）
+     * @param inputUpsertKey 输入数据中用于更新操作的键的索引数组
+     * @return 创建的 Transformation 对象
      */
     @SuppressWarnings("unchecked")
     protected Transformation<Object> createSinkTransformation(
@@ -161,14 +201,12 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             int rowtimeFieldIndex,
             boolean upsertMaterialize,
             int[] inputUpsertKey) {
-        // 从表汇规范中获取解析后的Schema
+        // 从表汇规格中获取解析后的 Schema
         final ResolvedSchema schema = tableSinkSpec.getContextResolvedTable().getResolvedSchema();
         // 获取数据汇的运行时提供者，这通常与具体的外部系统相关
-        final SinkRuntimeProvider runtimeProvider =
-                tableSink.getSinkRuntimeProvider(
-                        new SinkRuntimeProviderContext(
-                                isBounded, tableSinkSpec.getTargetColumns()));
-        // 根据解析后的Schema获取物理行类型
+        final SinkRuntimeProvider runtimeProvider = tableSink.getSinkRuntimeProvider(
+                new SinkRuntimeProviderContext(isBounded, tableSinkSpec.getTargetColumns()));
+        // 根据解析后的 Schema 获取物理行类型
         final RowType physicalRowType = getPhysicalRowType(schema);
         // 获取主键的索引数组，如果表定义了主键的话
         final int[] primaryKeys = getPrimaryKeyIndices(physicalRowType, schema);
@@ -176,37 +214,29 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         final int sinkParallelism = deriveSinkParallelism(inputTransform, runtimeProvider);
         // 标记是否显式配置了并行度
         sinkParallelismConfigured = isParallelismConfigured(runtimeProvider);
-        // 获取输入Transformation的并行度
+        // 获取输入 Transformation 的并行度
         final int inputParallelism = inputTransform.getParallelism();
         // 检查输入变更日志是否仅包含插入操作
         final boolean inputInsertOnly = inputChangelogMode.containsOnly(RowKind.INSERT);
         // 检查是否有定义主键
         final boolean hasPk = primaryKeys.length > 0;
 
-        // 检查输入并行度、数据汇并行度和是否包含主键的条件
+        // 如果输入不是仅插入模式，且数据汇并行度与输入并行度不同，且没有定义主键，则抛出异常
         if (!inputInsertOnly && sinkParallelism != inputParallelism && !hasPk) {
-            // 如果输入不是仅插入模式，且数据汇并行度与输入并行度不同，且没有定义主键，则抛出异常
-            throw new TableException(
-                    String.format(
-                            "The sink for table '%s' has a configured parallelism of %s, while the input parallelism is %s. "
-                                    + "Since the configured parallelism is different from the input's parallelism and "
-                                    + "the changelog mode is not insert-only, a primary key is required but could not "
-                                    + "be found.",
-                            tableSinkSpec
-                                    .getContextResolvedTable()
-                                    .getIdentifier()
-                                    .asSummaryString(),
-                            sinkParallelism,
-                            inputParallelism));
+            throw new TableException(String.format(
+                    "The sink for table '%s' has a configured parallelism of %s, while the input parallelism is %s. " +
+                            "Since the configured parallelism is different from the input's parallelism and " +
+                            "the changelog mode is not insert-only, a primary key is required but could not be found.",
+                    tableSinkSpec.getContextResolvedTable().getIdentifier().asSummaryString(),
+                    sinkParallelism,
+                    inputParallelism));
         }
 
-        // only add materialization if input has change
-        // 仅当输入包含变更时才需要物化
+        // 只有当输入包含变更时才需要物化
         final boolean needMaterialization = !inputInsertOnly && upsertMaterialize;
         // 应用约束验证（可能是对输入数据的校验）
-        Transformation<RowData> sinkTransform =
-                applyConstraintValidations(inputTransform, config, physicalRowType);
-        // 如果定义了主键
+        Transformation<RowData> sinkTransform = applyConstraintValidations(inputTransform, config, physicalRowType);
+        // 如果定义了主键，应用主键约束
         if (hasPk) {
             // 应用主键约束，可能涉及到数据的重新排序或分区
             sinkTransform =
@@ -219,7 +249,7 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                             inputParallelism,
                             needMaterialization);
         }
-        // 如果需要物化（即输入包含更新或删除操作）
+        // 如果需要物化，应用物化逻辑
         if (needMaterialization) {
             // 应用物化逻辑，将更新和删除操作转换为插入和删除操作（如果目标系统不支持直接更新）
             sinkTransform =
@@ -232,7 +262,7 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                             physicalRowType,
                             inputUpsertKey);
         }
-        // 获取目标行类型（可能是INSERT、UPDATE、DELETE等）
+        // 如果指定了目标行类型，应用行类型设置器
         Optional<RowKind> targetRowKind = getTargetRowKind();
         if (targetRowKind.isPresent()) {
             // 如果指定了目标行类型，则应用行类型设置器
@@ -251,13 +281,13 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
     }
 
     /**
-     * Apply an operator to filter or report error to process not-null values for not-null fields.
-     */
-    /**
-     * @授课老师: 码界探索
-     * @微信: 252810631
-     * @版权所有: 请尊重劳动成果
-     * 应用操作符以过滤或报告非空字段中非空值的错误。
+     * 应用约束验证，自动负责配置或者报告错误，
+     * 比如非空字段值与字段声明必须匹配（例如如果字段被声明为 NOT NULL，输入值不允许为 null）。
+     *
+     * @param inputTransform 输入的 Transformation，需要应用约束验证
+     * @param config         执行节点配置
+     * @param physicalRowType 物理行类型，包含字段信息
+     * @return 应用约束验证后的 Transformation
      */
     private Transformation<RowData> applyConstraintValidations(
             Transformation<RowData> inputTransform,
@@ -268,60 +298,48 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         // 获取物理行类型中所有字段的名称
         final String[] fieldNames = physicalRowType.getFieldNames().toArray(new String[0]);
 
-        // Build NOT NULL enforcer
-        // 构建非空约束执行器
+        // 非空约束
+        // 获取所有字段中不可为空的字段索引
         final int[] notNullFieldIndices = getNotNullFieldIndices(physicalRowType);
         if (notNullFieldIndices.length > 0) {
-            // 从配置中获取非空约束执行器选项
-            final ExecutionConfigOptions.NotNullEnforcer notNullEnforcer =
-                    config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_NOT_NULL_ENFORCER);
+            final ExecutionConfigOptions.NotNullEnforcer notNullEnforcer = config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_NOT_NULL_ENFORCER);
             // 将非空字段索引转换为字段名称列表
-            final List<String> notNullFieldNames =
-                    Arrays.stream(notNullFieldIndices)
-                            .mapToObj(idx -> fieldNames[idx])
-                            .collect(Collectors.toList());
-            // 向构建器添加非空约束
-            validatorBuilder.addNotNullConstraint(
-                    notNullEnforcer, notNullFieldIndices, notNullFieldNames, fieldNames);
+            final List<String> notNullFieldNames = Arrays.stream(notNullFieldIndices)
+                    .mapToObj(idx -> fieldNames[idx])
+                    .collect(Collectors.toList());
+            // 添加非空约束到构建器
+            validatorBuilder.addNotNullConstraint(notNullEnforcer, notNullFieldIndices, notNullFieldNames, fieldNames);
         }
-        // 从配置中获取类型长度约束执行器选项
-        final ExecutionConfigOptions.TypeLengthEnforcer typeLengthEnforcer =
-                config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER);
 
-        // Build CHAR/VARCHAR length enforcer
-        // 构建CHAR/VARCHAR长度约束执行器
-        final List<ConstraintEnforcer.FieldInfo> charFieldInfo =
-                getFieldInfoForLengthEnforcer(physicalRowType, LengthEnforcerType.CHAR);
+        // 类型长度约束
+        final ExecutionConfigOptions.TypeLengthEnforcer typeLengthEnforcer = config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER);
+
+        // CHAR 类型长度约束
+        final List<ConstraintEnforcer.FieldInfo> charFieldInfo = getFieldInfoForLengthEnforcer(physicalRowType, LengthEnforcerType.CHAR);
         if (!charFieldInfo.isEmpty()) {
-            // 将CHAR类型字段信息中的索引转换为字段名称列表
-            final List<String> charFieldNames =
-                    charFieldInfo.stream()
-                            .map(cfi -> fieldNames[cfi.fieldIdx()])
-                            .collect(Collectors.toList());
-            // 向构建器添加CHAR长度约束
-            validatorBuilder.addCharLengthConstraint(
-                    typeLengthEnforcer, charFieldInfo, charFieldNames, fieldNames);
+            // 将字段信息中的索引转换为字段名称列表
+            final List<String> charFieldNames = charFieldInfo.stream()
+                    .map(cfi -> fieldNames[cfi.fieldIdx()])
+                    .collect(Collectors.toList());
+            // 添加 CHAR 类型长度约束到构建器
+            validatorBuilder.addCharLengthConstraint(typeLengthEnforcer, charFieldInfo, charFieldNames, fieldNames);
         }
 
-        // Build BINARY/VARBINARY length enforcer
-        // 构建BINARY/VARBINARY长度约束执行器
-        final List<ConstraintEnforcer.FieldInfo> binaryFieldInfo =
-                getFieldInfoForLengthEnforcer(physicalRowType, LengthEnforcerType.BINARY);
+        // BINARY 类型长度约束
+        final List<ConstraintEnforcer.FieldInfo> binaryFieldInfo = getFieldInfoForLengthEnforcer(physicalRowType, LengthEnforcerType.BINARY);
         if (!binaryFieldInfo.isEmpty()) {
-            // 将BINARY/VARBINARY类型字段信息中的索引转换为字段名称列表
-            final List<String> binaryFieldNames =
-                    binaryFieldInfo.stream()
-                            .map(cfi -> fieldNames[cfi.fieldIdx()])
-                            .collect(Collectors.toList());
-            // 向构建器添加BINARY/VARBINARY长度约束
-            validatorBuilder.addBinaryLengthConstraint(
-                    typeLengthEnforcer, binaryFieldInfo, binaryFieldNames, fieldNames);
+            // 将字段信息中的索引转换为字段名称列表
+            final List<String> binaryFieldNames = binaryFieldInfo.stream()
+                    .map(cfi -> fieldNames[cfi.fieldIdx()])
+                    .collect(Collectors.toList());
+            // 添加 BINARY 类型长度约束到构建器
+            validatorBuilder.addBinaryLengthConstraint(typeLengthEnforcer, binaryFieldInfo, binaryFieldNames, fieldNames);
         }
+
         // 构建最终的约束执行器
         ConstraintEnforcer constraintEnforcer = validatorBuilder.build();
         if (constraintEnforcer != null) {
-            // 如果存在约束执行器（即至少有一个约束被添加），则创建一个新的转换逻辑
-            // 该转换逻辑将包含约束验证操作符
+            // 如果存在约束执行器，则创建新的 Transformation，并应用约束验证
             return ExecNodeUtil.createOneInputTransformation(
                     inputTransform,
                     createTransformationMeta(
@@ -334,13 +352,17 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                     inputTransform.getParallelism(),
                     false);
         } else {
-            // there are no not-null fields, just skip adding the enforcer operator
-            // 如果没有非空字段或长度约束字段，则跳过添加约束执行器操作符
-            // 直接返回原始的输入转换逻辑
+            // 如果没有约束，则直接返回原始输入 Transformation
             return inputTransform;
         }
     }
 
+    /**
+     * 获取物理行类型中不可为空的字段索引数组。
+     *
+     * @param physicalType 物理行类型
+     * @return 不可为空的字段索引数组
+     */
     private int[] getNotNullFieldIndices(RowType physicalType) {
         return IntStream.range(0, physicalType.getFieldCount())
                 .filter(pos -> !physicalType.getTypeAt(pos).isNullable())
@@ -348,11 +370,16 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
     }
 
     /**
-     * Returns a List of {@link ConstraintEnforcer.FieldInfo}, each containing the info needed to
-     * determine whether a string or binary value needs trimming and/or padding.
+     * 根据字段类型，返回对应的长度执行器所需的字段信息。
+     * 用于确定字符串或二进制值是否需要修剪和/或填充。
+     *
+     * @param physicalType 物理行类型
+     * @param enforcerType 长度执行器类型
+     * @return 长度执行器所需字段信息的列表
      */
     private List<ConstraintEnforcer.FieldInfo> getFieldInfoForLengthEnforcer(
-            RowType physicalType, LengthEnforcerType enforcerType) {
+            RowType physicalType,
+            LengthEnforcerType enforcerType) {
         LogicalTypeRoot staticType = null;
         LogicalTypeRoot variableType = null;
         int maxLength = 0;
@@ -371,13 +398,13 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         for (int i = 0; i < physicalType.getFieldCount(); i++) {
             LogicalType type = physicalType.getTypeAt(i);
             boolean isStatic = type.is(staticType);
-            // Should trim and possibly pad
+            // 检查是否需要进行长度验证
             if ((isStatic && (LogicalTypeChecks.getLength(type) < maxLength))
                     || (type.is(variableType) && (LogicalTypeChecks.getLength(type) < maxLength))) {
-                fieldsAndLengths.add(
-                        new ConstraintEnforcer.FieldInfo(
-                                i, LogicalTypeChecks.getLength(type), isStatic));
-            } else if (isStatic) { // Should pad
+                fieldsAndLengths.add(new ConstraintEnforcer.FieldInfo(
+                        i, LogicalTypeChecks.getLength(type), isStatic));
+            } else if (isStatic) {
+                // 仅需填充
                 fieldsAndLengths.add(new ConstraintEnforcer.FieldInfo(i, null, isStatic));
             }
         }
@@ -385,24 +412,24 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
     }
 
     /**
-     * Returns the parallelism of sink operator, it assumes the sink runtime provider implements
-     * {@link ParallelismProvider}. It returns parallelism defined in {@link ParallelismProvider} if
-     * the parallelism is provided, otherwise it uses parallelism of input transformation.
+     * 推导数据汇的并行度，假设数据汇运行时提供者实现了 {@link ParallelismProvider}。
+     * 如果提供的并行度存在，则返回提供的并行度；否则使用输入 Transformation 的并行度。
+     *
+     * @param inputTransform 输入 Transformation
+     * @param runtimeProvider 数据汇运行时提供者
+     * @return 推导出的并行度
      */
     private int deriveSinkParallelism(
-            Transformation<RowData> inputTransform, SinkRuntimeProvider runtimeProvider) {
+            Transformation<RowData> inputTransform,
+            SinkRuntimeProvider runtimeProvider) {
         final int inputParallelism = inputTransform.getParallelism();
         if (isParallelismConfigured(runtimeProvider)) {
             int sinkParallelism = ((ParallelismProvider) runtimeProvider).getParallelism().get();
             if (sinkParallelism <= 0) {
-                throw new TableException(
-                        String.format(
-                                "Invalid configured parallelism %s for table '%s'.",
-                                sinkParallelism,
-                                tableSinkSpec
-                                        .getContextResolvedTable()
-                                        .getIdentifier()
-                                        .asSummaryString()));
+                throw new TableException(String.format(
+                        "Invalid configured parallelism %s for table '%s'.",
+                        sinkParallelism,
+                        tableSinkSpec.getContextResolvedTable().getIdentifier().asSummaryString()));
             }
             return sinkParallelism;
         } else {
@@ -410,14 +437,28 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         }
     }
 
+    /**
+     * 检查数据汇运行时提供者是否显式配置了并行度。
+     *
+     * @param runtimeProvider 数据汇运行时提供者
+     * @return 是否显式配置了并行度
+     */
     private boolean isParallelismConfigured(DynamicTableSink.SinkRuntimeProvider runtimeProvider) {
         return runtimeProvider instanceof ParallelismProvider
                 && ((ParallelismProvider) runtimeProvider).getParallelism().isPresent();
     }
 
     /**
-     * Apply a primary key partition transformation to guarantee the strict ordering of changelog
-     * messages.
+     * 应用主键分区转换，以保证变更日志消息的严格顺序。
+     *
+     * @param config 执行节点配置
+     * @param classLoader 类加载器
+     * @param inputTransform 输入 Transformation
+     * @param primaryKeys 主键的索引数组
+     * @param sinkParallelism 数据汇的并行度
+     * @param inputParallelism 输入 Transformation 的并行度
+     * @param needMaterialize 是否需要物化
+     * @return 应用主键分区后的 Transformation
      */
     private Transformation<RowData> applyKeyBy(
             ExecNodeConfig config,
@@ -427,39 +468,51 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             int sinkParallelism,
             int inputParallelism,
             boolean needMaterialize) {
-        final ExecutionConfigOptions.SinkKeyedShuffle sinkShuffleByPk =
-                config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_KEYED_SHUFFLE);
+        final ExecutionConfigOptions.SinkKeyedShuffle sinkShuffleByPk = config.get(ExecutionConfigOptions.TABLE_EXEC_SINK_KEYED_SHUFFLE);
         boolean sinkKeyBy = false;
         switch (sinkShuffleByPk) {
             case NONE:
+                // 不进行 any action
                 break;
             case AUTO:
-                // should cover both insert-only and changelog input
+                // 当数据汇并行度与输入并行度不同时，且数据汇并行度不等于 1 时，启用主键分区
                 sinkKeyBy = sinkParallelism != inputParallelism && sinkParallelism != 1;
                 break;
             case FORCE:
-                // sink single parallelism has no problem (because none partitioner will cause worse
-                // disorder)
+                // 当数据汇并行度不等于 1 时，强制启用主键分区（单并行度不会导致数据乱序）
                 sinkKeyBy = sinkParallelism != 1;
                 break;
         }
+        // 如果不需要主键分区且不需要物化，则直接返回输入 Transformation
         if (!sinkKeyBy && !needMaterialize) {
             return inputTransform;
         }
 
-        final RowDataKeySelector selector =
-                KeySelectorUtil.getRowDataSelector(classLoader, primaryKeys, getInputTypeInfo());
-        final KeyGroupStreamPartitioner<RowData, RowData> partitioner =
-                new KeyGroupStreamPartitioner<>(
-                        selector, KeyGroupRangeAssignment.DEFAULT_LOWER_BOUND_MAX_PARALLELISM);
-        Transformation<RowData> partitionedTransform =
-                new PartitionTransformation<>(inputTransform, partitioner);
+        // 创建 RowData key 选择器
+        final RowDataKeySelector selector = KeySelectorUtil.getRowDataSelector(classLoader, primaryKeys, getInputTypeInfo());
+        final KeyGroupStreamPartitioner<RowData, RowData> partitioner = new KeyGroupStreamPartitioner<>(
+                selector, KeyGroupRangeAssignment.DEFAULT_LOWER_BOUND_MAX_PARALLELISM);
+        // 创建分区转换
+        Transformation<RowData> partitionedTransform = new PartitionTransformation<>(inputTransform, partitioner);
+        // 填充 Transformation 元数据
         createTransformationMeta(PARTITIONER_TRANSFORMATION, "Partitioner", "Partitioner", config)
                 .fill(partitionedTransform);
         partitionedTransform.setParallelism(sinkParallelism, sinkParallelismConfigured);
         return partitionedTransform;
     }
 
+    /**
+     * 应用物化逻辑，将更新和删除操作转换为插入或删除操作。
+     *
+     * @param inputTransform 输入 Transformation
+     * @param primaryKeys 主键索引数组
+     * @param sinkParallelism 数据汇并行度
+     * @param config 执行节点配置
+     * @param classLoader 类加载器
+     * @param physicalRowType 物理行类型
+     * @param inputUpsertKey 输入数据的更新键
+     * @return 应用物化后的 Transformation
+     */
     protected abstract Transformation<RowData> applyUpsertMaterialize(
             Transformation<RowData> inputTransform,
             int[] primaryKeys,
@@ -469,8 +522,18 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             RowType physicalRowType,
             int[] inputUpsertKey);
 
+    /**
+     * 应用行类型设置器，设置目标行类型。
+     *
+     * @param inputTransform 输入 Transformation
+     * @param rowKind 目标行类型
+     * @param config 执行节点配置
+     * @return 应用行类型设置器后的 Transformation
+     */
     private Transformation<RowData> applyRowKindSetter(
-            Transformation<RowData> inputTransform, RowKind rowKind, ExecNodeConfig config) {
+            Transformation<RowData> inputTransform,
+            RowKind rowKind,
+            ExecNodeConfig config) {
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
                 createTransformationMeta(
@@ -484,6 +547,18 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                 false);
     }
 
+    /**
+     * 根据数据汇运行时提供者类型，应用数据汇提供者逻辑，生成最终的 Transformation。
+     *
+     * @param inputTransform 输入 Transformation
+     * @param env Flink 的流执行环境
+     * @param runtimeProvider 数据汇运行时提供者
+     * @param rowtimeFieldIndex 行时间字段的索引
+     * @param sinkParallelism 数据汇并行度
+     * @param config 执行节点配置
+     * @param classLoader 类加载器
+     * @return 应用数据汇提供者后的 Transformation
+     */
     private Transformation<?> applySinkProvider(
             Transformation<RowData> inputTransform,
             StreamExecutionEnvironment env,
@@ -494,18 +569,20 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             ClassLoader classLoader) {
         try (TemporaryClassLoaderContext ignored = TemporaryClassLoaderContext.of(classLoader)) {
 
+            // 创建 TransformationMetadata，用于存储转换的元数据
             TransformationMetadata sinkMeta = createTransformationMeta(SINK_TRANSFORMATION, config);
+
+            // 根据运行时提供者类型生成 Transformation
             if (runtimeProvider instanceof DataStreamSinkProvider) {
-                Transformation<RowData> sinkTransformation =
-                        applyRowtimeTransformation(
-                                inputTransform, rowtimeFieldIndex, sinkParallelism, config);
+                // 对于 DataStreamSinkProvider，应用时间戳转换并生成 DataStream
+                Transformation<RowData> sinkTransformation = applyRowtimeTransformation(
+                        inputTransform, rowtimeFieldIndex, sinkParallelism, config);
                 final DataStream<RowData> dataStream = new DataStream<>(env, sinkTransformation);
                 final DataStreamSinkProvider provider = (DataStreamSinkProvider) runtimeProvider;
-                return provider.consumeDataStream(createProviderContext(config), dataStream)
-                        .getTransformation();
+                return provider.consumeDataStream(createProviderContext(config), dataStream).getTransformation();
             } else if (runtimeProvider instanceof TransformationSinkProvider) {
-                final TransformationSinkProvider provider =
-                        (TransformationSinkProvider) runtimeProvider;
+                // 对于 TransformationSinkProvider，直接创建 Transformation
+                final TransformationSinkProvider provider = (TransformationSinkProvider) runtimeProvider;
                 return provider.createTransformation(
                         new TransformationSinkProvider.Context() {
                             @Override
@@ -524,52 +601,33 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                             }
                         });
             } else if (runtimeProvider instanceof SinkFunctionProvider) {
-                final SinkFunction<RowData> sinkFunction =
-                        ((SinkFunctionProvider) runtimeProvider).createSinkFunction();
-                return createSinkFunctionTransformation(
-                        sinkFunction,
-                        env,
-                        inputTransform,
-                        rowtimeFieldIndex,
-                        sinkMeta,
-                        sinkParallelism);
+                // 对于 SinkFunctionProvider，创建 SinkFunction 并生成 Transformation
+                final SinkFunction<RowData> sinkFunction = ((SinkFunctionProvider) runtimeProvider).createSinkFunction();
+                return createSinkFunctionTransformation(sinkFunction, env, inputTransform, rowtimeFieldIndex, sinkMeta, sinkParallelism);
             } else if (runtimeProvider instanceof OutputFormatProvider) {
-                OutputFormat<RowData> outputFormat =
-                        ((OutputFormatProvider) runtimeProvider).createOutputFormat();
-                final SinkFunction<RowData> sinkFunction =
-                        new OutputFormatSinkFunction<>(outputFormat);
-                return createSinkFunctionTransformation(
-                        sinkFunction,
-                        env,
-                        inputTransform,
-                        rowtimeFieldIndex,
-                        sinkMeta,
-                        sinkParallelism);
+                // 对于 OutputFormatProvider，创建 OutputFormat 并生成 SinkFunctionTransformation
+                OutputFormat<RowData> outputFormat = ((OutputFormatProvider) runtimeProvider).createOutputFormat();
+                final SinkFunction<RowData> sinkFunction = new OutputFormatSinkFunction<>(outputFormat);
+                return createSinkFunctionTransformation(sinkFunction, env, inputTransform, rowtimeFieldIndex, sinkMeta, sinkParallelism);
             } else if (runtimeProvider instanceof SinkProvider) {
-                Transformation<RowData> sinkTransformation =
-                        applyRowtimeTransformation(
-                                inputTransform, rowtimeFieldIndex, sinkParallelism, config);
+                // 对于 SinkProvider，生成 DataStreamSink 的 Transformation
+                Transformation<RowData> sinkTransformation = applyRowtimeTransformation(
+                        inputTransform, rowtimeFieldIndex, sinkParallelism, config);
                 final DataStream<RowData> dataStream = new DataStream<>(env, sinkTransformation);
-                final Transformation<?> transformation =
-                        DataStreamSink.forSinkV1(
-                                        dataStream,
-                                        ((SinkProvider) runtimeProvider).createSink(),
-                                        CustomSinkOperatorUidHashes.DEFAULT)
-                                .getTransformation();
+                final Transformation<?> transformation = DataStreamSink.forSinkV1(
+                        dataStream, ((SinkProvider) runtimeProvider).createSink(),
+                        CustomSinkOperatorUidHashes.DEFAULT).getTransformation();
                 transformation.setParallelism(sinkParallelism, sinkParallelismConfigured);
                 sinkMeta.fill(transformation);
                 return transformation;
             } else if (runtimeProvider instanceof SinkV2Provider) {
-                Transformation<RowData> sinkTransformation =
-                        applyRowtimeTransformation(
-                                inputTransform, rowtimeFieldIndex, sinkParallelism, config);
+                // 对于 SinkV2Provider，生成 DataStreamSink 的 Transformation
+                Transformation<RowData> sinkTransformation = applyRowtimeTransformation(
+                        inputTransform, rowtimeFieldIndex, sinkParallelism, config);
                 final DataStream<RowData> dataStream = new DataStream<>(env, sinkTransformation);
-                final Transformation<?> transformation =
-                        DataStreamSink.forSink(
-                                        dataStream,
-                                        ((SinkV2Provider) runtimeProvider).createSink(),
-                                        CustomSinkOperatorUidHashes.DEFAULT)
-                                .getTransformation();
+                final Transformation<?> transformation = DataStreamSink.forSink(
+                        dataStream, ((SinkV2Provider) runtimeProvider).createSink(),
+                        CustomSinkOperatorUidHashes.DEFAULT).getTransformation();
                 transformation.setParallelism(sinkParallelism, sinkParallelismConfigured);
                 sinkMeta.fill(transformation);
                 return transformation;
@@ -579,6 +637,12 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         }
     }
 
+    /**
+     * 创建数据汇提供者上下文，用于生成唯一 ID。
+     *
+     * @param config 执行节点配置
+     * @return 提供者上下文
+     */
     private ProviderContext createProviderContext(ExecNodeConfig config) {
         return name -> {
             if (this instanceof StreamExecNode && config.shouldSetUid()) {
@@ -588,6 +652,17 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
         };
     }
 
+    /**
+     * 创建 SinkFunction 的 Transformation。
+     *
+     * @param sinkFunction SinkFunction，用于处理数据
+     * @param env Flink 的流执行环境
+     * @param inputTransformation 输入 Transformation
+     * @param rowtimeFieldIndex 行时间字段的索引
+     * @param transformationMetadata TransformationMetadata，包含元数据信息
+     * @param sinkParallelism 数据汇并行度
+     * @return 创建的 Transformation
+     */
     private Transformation<?> createSinkFunctionTransformation(
             SinkFunction<RowData> sinkFunction,
             StreamExecutionEnvironment env,
@@ -597,28 +672,37 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
             int sinkParallelism) {
         final SinkOperator operator = new SinkOperator(env.clean(sinkFunction), rowtimeFieldIndex);
 
+        // 如果 SinkFunction 支持输入类型配置，则设置输入类型
         if (sinkFunction instanceof InputTypeConfigurable) {
-            ((InputTypeConfigurable) sinkFunction)
-                    .setInputType(getInputTypeInfo(), env.getConfig());
+            ((InputTypeConfigurable) sinkFunction).setInputType(getInputTypeInfo(), env.getConfig());
         }
 
-        final Transformation<?> transformation =
-                new LegacySinkTransformation<>(
-                        inputTransformation,
-                        transformationMetadata.getName(),
-                        SimpleOperatorFactory.of(operator),
-                        sinkParallelism,
-                        sinkParallelismConfigured);
+        // 创建 Transformation
+        final Transformation<?> transformation = new LegacySinkTransformation<>(
+                inputTransformation,
+                transformationMetadata.getName(),
+                SimpleOperatorFactory.of(operator),
+                sinkParallelism,
+                sinkParallelismConfigured);
         transformationMetadata.fill(transformation);
         return transformation;
     }
 
+    /**
+     * 应用时间戳插入转换，为每个流记录设置时间戳。
+     *
+     * @param inputTransform 输入 Transformation
+     * @param rowtimeFieldIndex 行时间字段的索引
+     * @param sinkParallelism 数据汇并行度
+     * @param config 执行节点配置
+     * @return 应用时间戳插入后的 Transformation
+     */
     private Transformation<RowData> applyRowtimeTransformation(
             Transformation<RowData> inputTransform,
             int rowtimeFieldIndex,
             int sinkParallelism,
             ExecNodeConfig config) {
-        // Don't apply the transformation/operator if there is no rowtimeFieldIndex
+        // 如果没有行时间字段索引，则直接返回输入 Transformation
         if (rowtimeFieldIndex == -1) {
             return inputTransform;
         }
@@ -626,9 +710,7 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                 inputTransform,
                 createTransformationMeta(
                         TIMESTAMP_INSERTER_TRANSFORMATION,
-                        String.format(
-                                "StreamRecordTimestampInserter(rowtime field: %s)",
-                                rowtimeFieldIndex),
+                        String.format("StreamRecordTimestampInserter(rowtime field: %s)", rowtimeFieldIndex),
                         "StreamRecordTimestampInserter",
                         config),
                 new StreamRecordTimestampInserter(rowtimeFieldIndex),
@@ -637,43 +719,61 @@ public abstract class CommonExecSink extends ExecNodeBase<Object>
                 sinkParallelismConfigured);
     }
 
+    /**
+     * 获取输入类型信息，包含数据类型的逻辑信息。
+     *
+     * @return 输入类型信息
+     */
     private InternalTypeInfo<RowData> getInputTypeInfo() {
         return InternalTypeInfo.of(getInputEdges().get(0).getOutputType());
     }
 
+    /**
+     * 获取主键的索引数组，用于数据汇的主键分区等操作。
+     *
+     * @param sinkRowType 数据汇的行类型
+     * @param schema 解析后的 Schema
+     * @return 主键的索引数组
+     */
     protected int[] getPrimaryKeyIndices(RowType sinkRowType, ResolvedSchema schema) {
         return schema.getPrimaryKey()
                 .map(k -> k.getColumns().stream().mapToInt(sinkRowType::getFieldIndex).toArray())
                 .orElse(new int[0]);
     }
 
+    /**
+     * 获取物理行类型，包含 Schema 的物理列信息。
+     *
+     * @param schema 解析后的 Schema
+     * @return 物理行类型
+     */
     protected RowType getPhysicalRowType(ResolvedSchema schema) {
         return (RowType) schema.toPhysicalRowDataType().getLogicalType();
     }
 
+    // 长度执行器类型枚举
     private enum LengthEnforcerType {
         CHAR,
         BINARY
     }
 
     /**
-     * Get the target row-kind that the row data should change to, assuming the current row kind is
-     * RowKind.INSERT. Return Optional.empty() if it doesn't need to change. Currently, it'll only
-     * consider row-level delete/update.
+     * 获取目标行类型，如果输入行类型是 INSERT，则返回对应的变更日志行类型。
+     * 如果不需要变更，则返回空。
+     *
+     * @return 目标行类型，如果存在则非空
      */
     private Optional<RowKind> getTargetRowKind() {
         if (tableSinkSpec.getSinkAbilities() != null) {
             for (SinkAbilitySpec sinkAbilitySpec : tableSinkSpec.getSinkAbilities()) {
                 if (sinkAbilitySpec instanceof RowLevelDeleteSpec) {
                     RowLevelDeleteSpec deleteSpec = (RowLevelDeleteSpec) sinkAbilitySpec;
-                    if (deleteSpec.getRowLevelDeleteMode()
-                            == SupportsRowLevelDelete.RowLevelDeleteMode.DELETED_ROWS) {
+                    if (deleteSpec.getRowLevelDeleteMode() == SupportsRowLevelDelete.RowLevelDeleteMode.DELETED_ROWS) {
                         return Optional.of(RowKind.DELETE);
                     }
                 } else if (sinkAbilitySpec instanceof RowLevelUpdateSpec) {
                     RowLevelUpdateSpec updateSpec = (RowLevelUpdateSpec) sinkAbilitySpec;
-                    if (updateSpec.getRowLevelUpdateMode()
-                            == SupportsRowLevelUpdate.RowLevelUpdateMode.UPDATED_ROWS) {
+                    if (updateSpec.getRowLevelUpdateMode() == SupportsRowLevelUpdate.RowLevelUpdateMode.UPDATED_ROWS) {
                         return Optional.of(RowKind.UPDATE_AFTER);
                     }
                 }

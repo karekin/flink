@@ -40,29 +40,44 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * A Stream Sink. This is used for emitting elements from a streaming topology.
  *
  * @param <T> The type of the elements in the Stream
+ *
+ * <p>该类代表一个数据流的 Sink，用于在流式拓扑中发送（输出）元素。可以通过该类将处理好的数据写出到外部系统或者下游算子。
  */
 @Public
 public class DataStreamSink<T> {
 
+    // 物理转换对象，代表了实际的 Sink 转换操作
     private final PhysicalTransformation<T> transformation;
 
+    /**
+     * 构造方法，使用指定的物理转换操作来初始化 DataStreamSink。
+     *
+     * @param transformation 物理转换操作，不能为 null
+     */
     protected DataStreamSink(PhysicalTransformation<T> transformation) {
         this.transformation = checkNotNull(transformation);
     }
+
     /**
      * @授课老师(V): yi_locus
      * email: 156184212@qq.com
      * 构建DataStreamSink
-     * @param inputStream 上一个DataStream
-     * @param sinkFunction 打印Function
+     * @param inputStream 上一个DataStream，用于提供数据
+     * @param sinkFunction 用户自定义的 SinkFunction，用于处理或输出数据
+     * @param <T> 数据类型
+     * @return 创建好的 DataStreamSink 实例
+     *
+     * <p>该静态方法会将用户传入的 SinkFunction 包装成一个 StreamSink，然后构建一个 LegacySinkTransformation，
+     * 最后将该转换加入到执行环境中，以此完成一个可用的输出算子。
      */
     static <T> DataStreamSink<T> forSinkFunction(
             DataStream<T> inputStream, SinkFunction<T> sinkFunction) {
+        // 基于用户的 SinkFunction 创建 StreamSink
         StreamSink<T> sinkOperator = new StreamSink<>(sinkFunction);
         final StreamExecutionEnvironment executionEnvironment =
                 inputStream.getExecutionEnvironment();
         /**
-         * 构建输出的LegacySinkTransformation
+         * 构建 LegacySinkTransformation 输出转换
          */
         PhysicalTransformation<T> transformation =
                 new LegacySinkTransformation<>(
@@ -72,15 +87,24 @@ public class DataStreamSink<T> {
                         executionEnvironment.getParallelism(),
                         false);
         /**
-         * 将Transformation添加的List集合
+         * 将当前转换加到执行环境的 Transformation 列表中
          */
         executionEnvironment.addOperator(transformation);
         /**
-         * 返回DataStream
+         * 返回 DataStreamSink 实例
          */
         return new DataStreamSink<>(transformation);
     }
 
+    /**
+     * 内部使用的静态方法，用于基于新的 Sink API（org.apache.flink.api.connector.sink.Sink）创建 DataStreamSink。
+     *
+     * @param inputStream 上游 DataStream
+     * @param sink 目标 Sink 对象
+     * @param customSinkOperatorUidHashes 自定义的算子 UID 哈希信息
+     * @param <T> 数据类型
+     * @return 创建好的 DataStreamSink 实例
+     */
     @Internal
     public static <T> DataStreamSink<T> forSink(
             DataStream<T> inputStream,
@@ -88,6 +112,7 @@ public class DataStreamSink<T> {
             CustomSinkOperatorUidHashes customSinkOperatorUidHashes) {
         final StreamExecutionEnvironment executionEnvironment =
                 inputStream.getExecutionEnvironment();
+        // 使用 SinkTransformation 来封装新的 Sink
         SinkTransformation<T, T> transformation =
                 new SinkTransformation<>(
                         inputStream,
@@ -97,10 +122,21 @@ public class DataStreamSink<T> {
                         executionEnvironment.getParallelism(),
                         false,
                         customSinkOperatorUidHashes);
+        // 将此转换加到执行环境中
         executionEnvironment.addOperator(transformation);
         return new DataStreamSink<>(transformation);
     }
 
+    /**
+     * 内部使用的静态方法，用于将老版本的 org.apache.flink.api.connector.sink.Sink 接口封装成新的 SinkV1Adapter，
+     * 进而复用 forSink 方法完成创建。
+     *
+     * @param inputStream 上游 DataStream
+     * @param sink 旧版的 Sink 对象
+     * @param customSinkOperatorUidHashes 自定义算子 UID 哈希信息
+     * @param <T> 数据类型
+     * @return 创建好的 DataStreamSink 实例
+     */
     @Internal
     public static <T> DataStreamSink<T> forSinkV1(
             DataStream<T> inputStream,
@@ -109,12 +145,22 @@ public class DataStreamSink<T> {
         return forSink(inputStream, SinkV1Adapter.wrap(sink), customSinkOperatorUidHashes);
     }
 
-    /** Returns the transformation that contains the actual sink operator of this sink. */
+    /**
+     * 获取该 DataStreamSink 实际使用的 Transformation（转换操作），其中包含真正的 Sink operator。
+     *
+     * @return 返回此 Sink 所使用的 Transformation。
+     */
     @Internal
     public Transformation<T> getTransformation() {
         return transformation;
     }
 
+    /**
+     * 获取 LegacySinkTransformation 转换。如果当前 transformation 不是 LegacySinkTransformation 类型，则会抛出异常。
+     *
+     * @return 如果 transformation 为 LegacySinkTransformation，则返回该对象
+     * @throws IllegalStateException 当 transformation 不是 LegacySinkTransformation 时抛出
+     */
     @Internal
     public LegacySinkTransformation<T> getLegacyTransformation() {
         if (transformation instanceof LegacySinkTransformation) {
@@ -125,10 +171,10 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the name of this sink. This name is used by the visualization and logging during
-     * runtime.
+     * 设置此 Sink 的名称。该名称会在可视化和运行时日志中使用。
      *
-     * @return The named sink.
+     * @param name 要设置的名称
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     public DataStreamSink<T> name(String name) {
         transformation.setName(name);
@@ -136,16 +182,14 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets an ID for this operator.
+     * 为此算子设置一个唯一的 ID。
      *
-     * <p>The specified ID is used to assign the same operator ID across job submissions (for
-     * example when starting a job from a savepoint).
+     * <p>指定的 ID 在作业提交时可用于保留相同的算子 ID（例如从 savepoint 重启作业）。
      *
-     * <p><strong>Important</strong>: this ID needs to be unique per transformation and job.
-     * Otherwise, job submission will fail.
+     * <p><strong>重要：</strong>在一个作业中，每个 Transformation 的 ID 必须唯一，否则作业提交将失败。
      *
-     * @param uid The unique user-specified ID of this transformation.
-     * @return The operator with the specified ID.
+     * @param uid 用户指定的唯一 ID
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     @PublicEvolving
     public DataStreamSink<T> uid(String uid) {
@@ -154,26 +198,16 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets an user provided hash for this operator. This will be used AS IS the create the
-     * JobVertexID.
+     * 为此算子设置一个用户提供的哈希，用于创建 JobVertexID。
      *
-     * <p>The user provided hash is an alternative to the generated hashes, that is considered when
-     * identifying an operator through the default hash mechanics fails (e.g. because of changes
-     * between Flink versions).
+     * <p>用户提供的哈希可以用来替代自动生成的哈希，在默认哈希失效的情况下（例如不同版本的 Flink 之间的作业迁移）保持状态映射。
      *
-     * <p><strong>Important</strong>: this should be used as a workaround or for trouble shooting.
-     * The provided hash needs to be unique per transformation and job. Otherwise, job submission
-     * will fail. Furthermore, you cannot assign user-specified hash to intermediate nodes in an
-     * operator chain and trying so will let your job fail.
+     * <p><strong>重要：</strong>每个 Transformation 的自定义哈希也必须唯一，否则作业提交将失败。同时，此方法不能在
+     * operator chain 中的中间节点上使用，否则作业也会失败。
      *
-     * <p>A use case for this is in migration between Flink versions or changing the jobs in a way
-     * that changes the automatically generated hashes. In this case, providing the previous hashes
-     * directly through this method (e.g. obtained from old logs) can help to reestablish a lost
-     * mapping from states to their target operator.
-     *
-     * @param uidHash The user provided hash for this operator. This will become the JobVertexID,
-     *     which is shown in the logs and web ui.
-     * @return The operator with the user provided hash.
+     * @param uidHash 用户提供的哈希字符串，将直接用作 JobVertexID
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
+     * @throws UnsupportedOperationException 当非 LegacySinkTransformation 尝试调用该方法时抛出异常
      */
     @PublicEvolving
     public DataStreamSink<T> setUidHash(String uidHash) {
@@ -186,10 +220,10 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the parallelism for this sink. The degree must be higher than zero.
+     * 设置此 Sink 的并行度。并行度必须大于零。
      *
-     * @param parallelism The parallelism for this sink.
-     * @return The sink with set parallelism.
+     * @param parallelism 要设置的并行度
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     public DataStreamSink<T> setParallelism(int parallelism) {
         transformation.setParallelism(parallelism);
@@ -197,13 +231,12 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the max parallelism for this sink.
+     * 设置此 Sink 的最大并行度（MaxParallelism）。
      *
-     * <p>The maximum parallelism specifies the upper bound for dynamic scaling. The degree must be
-     * higher than zero and less than the upper bound.
+     * <p>最大并行度指定动态扩缩容的上限。该值必须大于零并小于上限值（Flink 中一般为 2^15）。
      *
-     * @param maxParallelism The max parallelism for this sink.
-     * @return The sink with set parallelism.
+     * @param maxParallelism 要设置的最大并行度
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     public DataStreamSink<T> setMaxParallelism(int maxParallelism) {
         OperatorValidationUtils.validateMaxParallelism(maxParallelism, true);
@@ -212,16 +245,13 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the description for this sink.
+     * 设置此 Sink 的描述信息。
      *
-     * <p>Description is used in json plan and web ui, but not in logging and metrics where only
-     * name is available. Description is expected to provide detailed information about the sink,
-     * while name is expected to be more simple, providing summary information only, so that we can
-     * have more user-friendly logging messages and metric tags without losing useful messages for
-     * debugging.
+     * <p>描述信息会显示在 JSON plan 和 web UI 中，而在日志和指标中只会显示名称（name）。
+     * 因此，建议在描述信息中提供更详细的内容，而在名称中只提供简要的概览。
      *
-     * @param description The description for this sink.
-     * @return The sink with new description.
+     * @param description 为此 Sink 设置的描述信息
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     @PublicEvolving
     public DataStreamSink<T> setDescription(String description) {
@@ -229,18 +259,14 @@ public class DataStreamSink<T> {
         return this;
     }
 
-    //	---------------------------------------------------------------------------
-    //	 Fine-grained resource profiles are an incomplete work-in-progress feature
-    //	 The setters are hence private at this point.
-    //	---------------------------------------------------------------------------
+    // 下面的资源相关配置是实验性或尚未完成的特性，因此暂时将 setter 方法设为 private
 
     /**
-     * Sets the minimum and preferred resources for this sink, and the lower and upper resource
-     * limits will be considered in resource resize feature for future plan.
+     * 设置最小和首选资源配置。未来会在资源自动伸缩特性中考虑这个区间。
      *
-     * @param minResources The minimum resources for this sink.
-     * @param preferredResources The preferred resources for this sink
-     * @return The sink with set minimum and preferred resources.
+     * @param minResources 最小资源配置
+     * @param preferredResources 首选资源配置
+     * @return 当前 DataStreamSink 实例
      */
     private DataStreamSink<T> setResources(
             ResourceSpec minResources, ResourceSpec preferredResources) {
@@ -250,11 +276,10 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the resources for this sink, the minimum and preferred resources are the same by
-     * default.
+     * 设置资源配置，最小和首选资源相同。
      *
-     * @param resources The resources for this sink.
-     * @return The sink with set minimum and preferred resources.
+     * @param resources 资源配置
+     * @return 当前 DataStreamSink 实例
      */
     private DataStreamSink<T> setResources(ResourceSpec resources) {
         transformation.setResources(resources, resources);
@@ -263,14 +288,12 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Turns off chaining for this operator so thread co-location will not be used as an
-     * optimization.
+     * 关闭此算子的 chaining。这样做会禁止使用线程共驻（co-location）进行优化。
      *
-     * <p>Chaining can be turned off for the whole job by {@link
-     * org.apache.flink.streaming.api.environment.StreamExecutionEnvironment#disableOperatorChaining()}
-     * however it is not advised for performance considerations.
+     * <p>可以通过 {@link org.apache.flink.streaming.api.environment.StreamExecutionEnvironment#disableOperatorChaining()}
+     * 关闭整个作业的 chaining，但会影响性能，因此一般不建议这样做。
      *
-     * @return The sink with chaining disabled
+     * @return 返回当前 DataStreamSink 实例，便于链式调用
      */
     @PublicEvolving
     public DataStreamSink<T> disableChaining() {
@@ -279,16 +302,14 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the slot sharing group of this operation. Parallel instances of operations that are in
-     * the same slot sharing group will be co-located in the same TaskManager slot, if possible.
+     * 为该算子设置 slot sharing group。相同 slot sharing group 中的并行实例会尽可能在同一个 TaskManager slot 中执行。
      *
-     * <p>Operations inherit the slot sharing group of input operations if all input operations are
-     * in the same slot sharing group and no slot sharing group was explicitly specified.
+     * <p>如果所有输入算子都在同一个 slot sharing group 且未显式指定分组，则会继承输入算子的分组。
      *
-     * <p>Initially an operation is in the default slot sharing group. An operation can be put into
-     * the default group explicitly by setting the slot sharing group to {@code "default"}.
+     * <p>操作初始时位于默认的 slot sharing group。可以将算子显式地设置到名称为 {@code "default"} 的分组中。
      *
-     * @param slotSharingGroup The slot sharing group name.
+     * @param slotSharingGroup 要设置的 slot sharing group 名称
+     * @return 当前 DataStreamSink 实例，便于链式调用
      */
     @PublicEvolving
     public DataStreamSink<T> slotSharingGroup(String slotSharingGroup) {
@@ -297,16 +318,14 @@ public class DataStreamSink<T> {
     }
 
     /**
-     * Sets the slot sharing group of this operation. Parallel instances of operations that are in
-     * the same slot sharing group will be co-located in the same TaskManager slot, if possible.
+     * 为该算子设置 slot sharing group。相同 slot sharing group 中的并行实例会尽可能在同一个 TaskManager slot 中执行。
      *
-     * <p>Operations inherit the slot sharing group of input operations if all input operations are
-     * in the same slot sharing group and no slot sharing group was explicitly specified.
+     * <p>如果所有输入算子都在同一个 slot sharing group 且未显式指定分组，则会继承输入算子的分组。
      *
-     * <p>Initially an operation is in the default slot sharing group. An operation can be put into
-     * the default group explicitly by setting the slot sharing group with name {@code "default"}.
+     * <p>操作初始时位于默认的 slot sharing group。可以将算子显式地设置到名称为 {@code "default"} 的分组中。
      *
-     * @param slotSharingGroup which contains name and its resource spec.
+     * @param slotSharingGroup slot sharing group 对象，包含组名以及相关的资源配置
+     * @return 当前 DataStreamSink 实例，便于链式调用
      */
     @PublicEvolving
     public DataStreamSink<T> slotSharingGroup(SlotSharingGroup slotSharingGroup) {
@@ -314,3 +333,4 @@ public class DataStreamSink<T> {
         return this;
     }
 }
+

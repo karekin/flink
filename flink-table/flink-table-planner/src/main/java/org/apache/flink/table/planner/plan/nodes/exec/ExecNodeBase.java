@@ -51,55 +51,50 @@ import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * Base class for {@link ExecNode}.
+ * 所有 {@link ExecNode} 的基类。
  *
- * @param <T> The type of the elements that result from this node.
+ * @param <T> 此节点返回元素的类型。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public abstract class ExecNodeBase<T> implements ExecNode<T> {
 
     /**
-     * The default value of this flag is false. Other cases must set this flag accordingly via
-     * {@link #setCompiled(boolean)}. It is not exposed via a constructor arg to avoid complex
-     * constructor overloading for all {@link ExecNode}s. However, during deserialization this flag
-     * will always be set to true.
+     * 该标志的默认值为 false。其他情况必须通过 {@link #setCompiled(boolean)} 设置此标志。
+     * 这是为了避免因复杂构造函数过载而导致所有 {@link ExecNode} 出现构造函数参数的问题。
+     * 但在反序列化时，该标志始终设置为 true。
      */
     @JacksonInject("isDeserialize")
     private boolean isCompiled;
 
-    private final String description;
+    private final String description; // 节点的描述信息
+    private final LogicalType outputType; // 输出的数据类型
+    private final List<InputProperty> inputProperties; // 输入属性列表
 
-    private final LogicalType outputType;
+    private List<ExecEdge> inputEdges; // 输入边列表
+    private transient Transformation<T> transformation; // 转换为 Flink 的 Transformation
 
-    private final List<InputProperty> inputProperties;
-
-    private List<ExecEdge> inputEdges;
-
-    private transient Transformation<T> transformation;
-
-    private @Nullable transient OpFusionCodegenSpecGenerator fusionCodegenSpecGenerator;
-
-    /** Holds the context information (id, name, version) as deserialized from a JSON plan. */
+    private @Nullable transient OpFusionCodegenSpecGenerator fusionCodegenSpecGenerator; // 算子融合代码生成规范生成器
+    /** 从 JSON 计划中反序列化获取的上下文信息（ID、名称、版本）。 */
     @JsonProperty(value = FIELD_NAME_TYPE, access = JsonProperty.Access.WRITE_ONLY)
     private final ExecNodeContext context;
 
     /**
-     * Retrieves the default context from the {@link ExecNodeMetadata} annotation to be serialized
-     * into the JSON plan.
+     * 在 JSON 计划序列化过程中，从 {@link ExecNodeMetadata} 注解中检索默认上下文。
      */
     @JsonProperty(value = FIELD_NAME_TYPE, access = JsonProperty.Access.READ_ONLY, index = 1)
     protected final ExecNodeContext getContextFromAnnotation() {
+        // 如果已编译，则返回 context，否则创建一个新的上下文并设置 ID
         return isCompiled ? context : ExecNodeContext.newContext(this.getClass()).withId(getId());
     }
 
     @JsonProperty(value = FIELD_NAME_CONFIGURATION, access = JsonProperty.Access.WRITE_ONLY)
-    private final ReadableConfig persistedConfig;
+    private final ReadableConfig persistedConfig; // 保存的配置
 
     @JsonProperty(
             value = FIELD_NAME_CONFIGURATION,
             access = JsonProperty.Access.READ_ONLY,
             index = 2)
-    // Custom filter to exclude node configuration if no consumed options are used
+    // 自定义筛选器，如果未使用消耗选项，则从节点配置中排除
     @JsonInclude(
             value = JsonInclude.Include.CUSTOM,
             valueFilter = ConfigurationJsonSerializerFilter.class)
@@ -107,6 +102,16 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
         return persistedConfig;
     }
 
+    /**
+     * 构造一个执行节点基类。
+     *
+     * @param id                    节点 ID
+     * @param context               执行节点上下文
+     * @param persistedConfig       保存的配置，可能为 null
+     * @param inputProperties       输入属性列表
+     * @param outputType            输出数据类型
+     * @param description           节点的描述
+     */
     protected ExecNodeBase(
             int id,
             ExecNodeContext context,
@@ -114,101 +119,92 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
             List<InputProperty> inputProperties,
             LogicalType outputType,
             String description) {
-        this.context = checkNotNull(context).withId(id);
-        this.persistedConfig = persistedConfig == null ? new Configuration() : persistedConfig;
-        this.inputProperties = checkNotNull(inputProperties);
-        this.outputType = checkNotNull(outputType);
-        this.description = checkNotNull(description);
+        this.context = checkNotNull(context).withId(id); // 初始化上下文并设置 ID
+        this.persistedConfig = persistedConfig == null ? new Configuration() : persistedConfig; // 初始化配置
+        this.inputProperties = checkNotNull(inputProperties); // 初始化输入属性
+        this.outputType = checkNotNull(outputType); // 初始化输出数据类型
+        this.description = checkNotNull(description); // 初始化描述
     }
 
     @Override
     public final int getId() {
-        return context.getId();
+        return context.getId(); // 返回节点 ID
     }
 
     @Override
     public String getDescription() {
-        return description;
+        return description; // 返回节点描述
     }
 
     @Override
     public LogicalType getOutputType() {
-        return outputType;
+        return outputType; // 返回输出数据类型
     }
 
     @Override
     public List<InputProperty> getInputProperties() {
-        return inputProperties;
+        return inputProperties; // 返回输入属性列表
     }
 
     @Override
     public List<ExecEdge> getInputEdges() {
         return checkNotNull(
                 inputEdges,
-                "inputEdges should not null, please call `setInputEdges(List<ExecEdge>)` first.");
+                "inputEdges should not be null, please call `setInputEdges(List<ExecEdge>)` first."); // 返回输入边列表
     }
 
     @Override
     public void setInputEdges(List<ExecEdge> inputEdges) {
-        checkNotNull(inputEdges, "inputEdges should not be null.");
-        this.inputEdges = new ArrayList<>(inputEdges);
+        checkNotNull(inputEdges, "inputEdges should not be null."); // 输入边不能为空
+        this.inputEdges = new ArrayList<>(inputEdges); // 设置输入边列表
     }
 
     @Override
     public void replaceInputEdge(int index, ExecEdge newInputEdge) {
-        List<ExecEdge> edges = getInputEdges();
-        checkArgument(index >= 0 && index < edges.size());
-        edges.set(index, newInputEdge);
+        List<ExecEdge> edges = getInputEdges(); // 获取输入边列表
+        checkArgument(index >= 0 && index < edges.size(), "Invalid index: " + index); // 索引必须有效
+        edges.set(index, newInputEdge); // 替换指定位置的输入边
     }
 
     /**
-     * @授课老师: 码界探索
-     * @微信: 252810631
-     * @版权所有: 请尊重劳动成果
-     * 将ExecNode转换为Transformation
+     * 将 ExecNode 转换为 Flink 的 Transformation。
      */
     @Override
     public final Transformation<T> translateToPlan(Planner planner) {
-        // 如果transformation还未被初始化，则进行初始化
         if (transformation == null) {
-            transformation =
-                    translateToPlanInternal(
-                            (PlannerBase) planner,// 将planner强制转换为PlannerBase类型，并传入translateToPlanInternal方法
-                            ExecNodeConfig.of(// 创建ExecNodeConfig对象，传入planner的表配置、持久化配置和编译状态
-                                    ((PlannerBase) planner).getTableConfig(),
-                                    persistedConfig,
-                                    isCompiled));
-            // 如果当前对象是SingleTransformationTranslator的实例
+            // 如果 transformation 未初始化，则进行初始化
+            transformation = translateToPlanInternal((PlannerBase) planner,
+                    ExecNodeConfig.of(((PlannerBase) planner).getTableConfig(),
+                            persistedConfig,
+                            isCompiled));
+            // 如果当前对象是 SingleTransformationTranslator 的实例，并且输入包含单例，则设置并行度为 1
             if (this instanceof SingleTransformationTranslator) {
-                // 并且transformation包含单例输入
                 if (inputsContainSingleton(transformation)) {
-                    // 将transformation的并行度和最大并行度设置为1
                     transformation.setParallelism(1);
                     transformation.setMaxParallelism(1);
                 }
             }
         }
-        return transformation;// 返回transformation对象
+        return transformation; // 返回转换后的 Transformation
     }
 
     @Override
     public void accept(ExecNodeVisitor visitor) {
-        visitor.visit(this);
+        visitor.visit(this); // 接收执行节点访问者
     }
 
     @Override
     public void setCompiled(boolean compiled) {
-        isCompiled = compiled;
+        isCompiled = compiled; // 设置编译状态
     }
 
     /**
-     * Internal method, translates this node into a Flink operator.
+     * 将此节点转换为 Flink 的 Transformation。
      *
-     * @param planner The planner.
-     * @param config per-{@link ExecNode} configuration that contains the merged configuration from
-     *     various layers which all the nodes implementing this method should use, instead of
-     *     retrieving configuration from the {@code planner}. For more details check {@link
-     *     ExecNodeConfig}.
+     * @param planner   PlannerBase 类型的规划器
+     * @param config    每个 ExecNode 的配置，包含从不同层合并的配置，所有实现此方法的节点都应使用此配置，而不是从 planner 中检索配置。
+     *                  有关详细信息，请参阅 {@link ExecNodeConfig}。
+     * @return 转换后的 Transformation 对象
      */
     protected abstract Transformation<T> translateToPlanInternal(
             PlannerBase planner, ExecNodeConfig config);
@@ -216,15 +212,15 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
     private boolean inputsContainSingleton(Transformation<T> transformation) {
         return inputsContainSingleton()
                 || transformation.getInputs().stream()
-                        .anyMatch(
-                                input ->
-                                        input instanceof PartitionTransformation
-                                                && ((PartitionTransformation<?>) input)
-                                                                .getPartitioner()
-                                                        instanceof GlobalPartitioner);
+                .anyMatch(
+                        input ->
+                                input instanceof PartitionTransformation
+                                        && ((PartitionTransformation<?>) input)
+                                        .getPartitioner()
+                                        instanceof GlobalPartitioner);
     }
 
-    /** Whether singleton distribution is required. */
+    /** 是否需要单例分布。 */
     protected boolean inputsContainSingleton() {
         return getInputProperties().stream()
                 .anyMatch(
@@ -235,42 +231,38 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
 
     @JsonIgnore
     protected String getSimplifiedName() {
+        // 返回简化的类名
         return getClass().getSimpleName().replace("StreamExec", "").replace("BatchExec", "");
     }
 
     protected String createTransformationUid(String operatorName, ExecNodeConfig config) {
+        // 根据上下文和配置生成唯一的 Uid
         return context.generateUid(operatorName, config);
     }
 
     protected String createTransformationName(ReadableConfig config) {
+        // 创建转换的名称
         return createFormattedTransformationName(getDescription(), getSimplifiedName(), config);
     }
 
     protected String createTransformationDescription(ReadableConfig config) {
+        // 创建转换的描述
         return createFormattedTransformationDescription(getDescription(), config);
     }
 
     /**
-     * @授课老师: 码界探索
-     * @微信: 252810631
-     * @版权所有: 请尊重劳动成果
      * 创建转换的元数据。
      *
-     * @param operatorName 操作符的名称，用于在需要时生成唯一标识符（UID）。
-     * @param config 执行节点配置，包含了是否应该设置UID以及其他可能的配置信息。
-     * @return 返回创建的转换元数据对象。
+     * @param operatorName 操作符的名称，用于生成 Uid
+     * @param config       执行节点配置
+     * @return 转换元数据对象
      */
     protected TransformationMetadata createTransformationMeta(
             String operatorName, ExecNodeConfig config) {
-        // 检查当前类是否被标记为不支持或者配置指示不应设置UID
         if (ExecNodeMetadataUtil.isUnsupported(this.getClass()) || !config.shouldSetUid()) {
-            // 如果不支持或者不应设置UID，则只使用配置信息来创建基本的转换元数据
-            // 包括转换的名称和描述
             return new TransformationMetadata(
                     createTransformationName(config), createTransformationDescription(config));
         } else {
-            // 如果支持且配置指示应设置UID，则除了名称和描述外，还使用操作符名称和配置信息来生成UID
-            // 并创建包含UID、名称和描述的完整转换元数据
             return new TransformationMetadata(
                     createTransformationUid(operatorName, config),
                     createTransformationName(config),
@@ -309,12 +301,12 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
     @VisibleForTesting
     @JsonIgnore
     public Transformation<T> getTransformation() {
-        return this.transformation;
+        return this.transformation; // 返回转换后的 Transformation
     }
 
     @Override
     public boolean supportFusionCodegen() {
-        return false;
+        return false; // 默认不支持算子融合代码生成
     }
 
     @Override
@@ -330,18 +322,17 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
                                     isCompiled),
                             parentCtx);
         }
-
         return fusionCodegenSpecGenerator;
     }
 
     /**
-     * Internal method, translates this node into a operator codegen spec generator.
+     * 将此节点转换为算子融合代码生成规范生成器。
      *
-     * @param planner The planner.
-     * @param config per-{@link ExecNode} configuration that contains the merged configuration from
-     *     various layers which all the nodes implementing this method should use, instead of
-     *     retrieving configuration from the {@code planner}. For more details check {@link
-     *     ExecNodeConfig}.
+     * @param planner   PlannerBase 类型的规划器
+     * @param config    每个 ExecNode 的配置，包含从不同层合并的配置，所有实现此方法的节点都应使用此配置，而不是从 planner 中检索配置。
+     *                  有关详细信息，请参阅 {@link ExecNodeConfig}。
+     * @param parentCtx 父级代码生成上下文
+     * @return 转换后的 OpFusionCodegenSpecGenerator 对象
      */
     protected OpFusionCodegenSpecGenerator translateToFusionCodegenSpecInternal(
             PlannerBase planner, ExecNodeConfig config, CodeGeneratorContext parentCtx) {

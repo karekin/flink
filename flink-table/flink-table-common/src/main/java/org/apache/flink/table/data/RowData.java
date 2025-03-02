@@ -35,37 +35,27 @@ import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getPr
 import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getScale;
 
 /**
- * Base interface for an internal data structure representing data of {@link RowType} and other
- * (possibly nested) structured types such as {@link StructuredType} in the table ecosystem.
+ * 表生态系统中用于表示数据的内部数据结构的基本接口，支持 {@link RowType} 和其他（可能嵌套的）结构化类型（如 {@link StructuredType}）。
  *
- * <p>All top-level records that are travelling through Table API or SQL pipelines during runtime
- * are instances of this interface. Each {@link RowData} contains a {@link RowKind} which represents
- * the kind of change that a row describes in a changelog. The {@link RowKind} is just metadata
- * information of row and thus not part of the table's schema, i.e., not a dedicated field.
+ * <p>所有在 Table API 或 SQL 管道中传输的顶级记录都是此接口的实例。每个 {@link RowData} 包含一个 {@link RowKind}，表示该行在变更日志中描述的变更类型。
+ * {@link RowKind} 仅是行的元数据信息，不属于表的 Schema，即不是专门的字段。
  *
- * <p>Note: All fields of this data structure must be internal data structures.
+ * <p>注意：此数据结构的所有字段必须是内部数据结构。
  *
- * <p>The {@link RowData} interface has different implementations which are designed for different
- * scenarios:
+ * <p>{@link RowData} 接口有多种实现，适用于不同的场景：
  *
  * <ul>
- *   <li>The binary-oriented implementation {@code BinaryRowData} is backed by references to {@link
- *       MemorySegment} instead of using Java objects to reduce the serialization/deserialization
- *       overhead.
- *   <li>The object-oriented implementation {@link GenericRowData} is backed by an array of Java
- *       {@link Object} which is easy to construct and efficient to update.
+ *   <li>二进制导向的实现 {@code BinaryRowData} 使用 {@link MemorySegment} 引用而不是 Java 对象，以减少序列化/反序列化的开销。
+ *   <li>面向对象的实现 {@link GenericRowData} 使用 Java {@link Object} 数组，易于构造且更新高效。
  * </ul>
  *
- * <p>{@link GenericRowData} is intended for public use and has stable behavior. It is recommended
- * to construct instances of {@link RowData} with this class if internal data structures are
- * required.
+ * <p>{@link GenericRowData} 适用于公共使用，行为稳定。如果需要内部数据结构，建议使用此类构造 {@link RowData} 实例。
  *
- * <p>The mappings from Flink's Table API and SQL data types to the internal data structures are
- * listed in the following table:
+ * <p>Flink 的 Table API 和 SQL 数据类型与内部数据结构的映射关系如下表所示：
  *
  * <pre>
  * +--------------------------------+-----------------------------------------+
- * | SQL Data Types                 | Internal Data Structures                |
+ * | SQL 数据类型                   | 内部数据结构                            |
  * +--------------------------------+-----------------------------------------+
  * | BOOLEAN                        | boolean                                 |
  * +--------------------------------+-----------------------------------------+
@@ -87,17 +77,17 @@ import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getSc
  * +--------------------------------+-----------------------------------------+
  * | DOUBLE                         | double                                  |
  * +--------------------------------+-----------------------------------------+
- * | DATE                           | int (number of days since epoch)        |
+ * | DATE                           | int（自纪元以来的天数）                 |
  * +--------------------------------+-----------------------------------------+
- * | TIME                           | int (number of milliseconds of the day) |
+ * | TIME                           | int（一天中的毫秒数）                   |
  * +--------------------------------+-----------------------------------------+
  * | TIMESTAMP                      | {@link TimestampData}                   |
  * +--------------------------------+-----------------------------------------+
  * | TIMESTAMP WITH LOCAL TIME ZONE | {@link TimestampData}                   |
  * +--------------------------------+-----------------------------------------+
- * | INTERVAL YEAR TO MONTH         | int (number of months)                  |
+ * | INTERVAL YEAR TO MONTH         | int（月份数）                           |
  * +--------------------------------+-----------------------------------------+
- * | INTERVAL DAY TO MONTH          | long (number of milliseconds)           |
+ * | INTERVAL DAY TO SECOND         | long（毫秒数）                          |
  * +--------------------------------+-----------------------------------------+
  * | ROW / structured types         | {@link RowData}                         |
  * +--------------------------------+-----------------------------------------+
@@ -109,118 +99,144 @@ import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getSc
  * +--------------------------------+-----------------------------------------+
  * </pre>
  *
- * <p>Nullability is always handled by the container data structure.
+ * <p>可空性始终由容器数据结构处理。
  */
 /**
  * @授课老师: 码界探索
  * @微信: 252810631
  * @版权所有: 请尊重劳动成果
- * 内部数据结构的基本接口，表示表生态系统中｛@link RowType｝和其他（可能嵌套的）结构化类型（如｛@link StructuredType｝）的数据。
+ * 表生态系统中用于表示数据的内部数据结构的基本接口，支持 {@link RowType} 和其他（可能嵌套的）结构化类型（如 {@link StructuredType}）。
  */
 @PublicEvolving
 public interface RowData {
 
     /**
-     * Returns the number of fields in this row.
+     * 返回此行中的字段数量。
      *
-     * <p>The number does not include {@link RowKind}. It is kept separately.
+     * <p>该数量不包括 {@link RowKind}，{@link RowKind} 是单独存储的。
      */
     int getArity();
 
     /**
-     * Returns the kind of change that this row describes in a changelog.
+     * 返回此行在变更日志中描述的变更类型。
      *
      * @see RowKind
      */
     RowKind getRowKind();
 
     /**
-     * Sets the kind of change that this row describes in a changelog.
+     * 设置此行在变更日志中描述的变更类型。
      *
      * @see RowKind
      */
     void setRowKind(RowKind kind);
 
     // ------------------------------------------------------------------------------------------
-    // Read-only accessor methods
+    // 只读访问方法
     // ------------------------------------------------------------------------------------------
 
-    /** Returns true if the field is null at the given position. */
+    /**
+     * 如果指定位置的字段为 null，则返回 true。
+     */
     boolean isNullAt(int pos);
 
-    /** Returns the boolean value at the given position. */
+    /**
+     * 返回指定位置的布尔值。
+     */
     boolean getBoolean(int pos);
 
-    /** Returns the byte value at the given position. */
+    /**
+     * 返回指定位置的字节值。
+     */
     byte getByte(int pos);
 
-    /** Returns the short value at the given position. */
+    /**
+     * 返回指定位置的短整型值。
+     */
     short getShort(int pos);
 
-    /** Returns the integer value at the given position. */
+    /**
+     * 返回指定位置的整型值。
+     */
     int getInt(int pos);
 
-    /** Returns the long value at the given position. */
+    /**
+     * 返回指定位置的长整型值。
+     */
     long getLong(int pos);
 
-    /** Returns the float value at the given position. */
+    /**
+     * 返回指定位置的浮点型值。
+     */
     float getFloat(int pos);
 
-    /** Returns the double value at the given position. */
+    /**
+     * 返回指定位置的双精度浮点型值。
+     */
     double getDouble(int pos);
 
-    /** Returns the string value at the given position. */
+    /**
+     * 返回指定位置的字符串值。
+     */
     StringData getString(int pos);
 
     /**
-     * Returns the decimal value at the given position.
+     * 返回指定位置的 Decimal 值。
      *
-     * <p>The precision and scale are required to determine whether the decimal value was stored in
-     * a compact representation (see {@link DecimalData}).
+     * <p>需要精度和小数位数来确定 Decimal 值是否以紧凑格式存储（参见 {@link DecimalData}）。
      */
     DecimalData getDecimal(int pos, int precision, int scale);
 
     /**
-     * Returns the timestamp value at the given position.
+     * 返回指定位置的 Timestamp 值。
      *
-     * <p>The precision is required to determine whether the timestamp value was stored in a compact
-     * representation (see {@link TimestampData}).
+     * <p>需要精度来确定 Timestamp 值是否以紧凑格式存储（参见 {@link TimestampData}）。
      */
     TimestampData getTimestamp(int pos, int precision);
 
-    /** Returns the raw value at the given position. */
+    /**
+     * 返回指定位置的原始值。
+     *
+     * @param <T> 原始值的类型
+     */
     <T> RawValueData<T> getRawValue(int pos);
 
-    /** Returns the binary value at the given position. */
+    /**
+     * 返回指定位置的二进制值。
+     */
     byte[] getBinary(int pos);
 
-    /** Returns the array value at the given position. */
+    /**
+     * 返回指定位置的数组值。
+     */
     ArrayData getArray(int pos);
 
-    /** Returns the map value at the given position. */
+    /**
+     * 返回指定位置的 Map 值。
+     */
     MapData getMap(int pos);
 
     /**
-     * Returns the row value at the given position.
+     * 返回指定位置的行值。
      *
-     * <p>The number of fields is required to correctly extract the row.
+     * <p>需要字段数量以正确提取行。
      */
     RowData getRow(int pos, int numFields);
 
     // ------------------------------------------------------------------------------------------
-    // Access Utilities
+    // 访问工具
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Creates an accessor for getting elements in an internal row data structure at the given
-     * position.
+     * 为给定位置的内部行数据结构创建一个访问器，用于获取元素。
      *
-     * @param fieldType the element type of the row
-     * @param fieldPos the element position of the row
+     * @param fieldType 行元素的类型
+     * @param fieldPos 行元素的位置
+     * @return 创建的字段访问器
      */
     static FieldGetter createFieldGetter(LogicalType fieldType, int fieldPos) {
-        final FieldGetter fieldGetter;
-        // ordered by type root definition
+        FieldGetter fieldGetter;
+        // 按类型根定义排序
         switch (fieldType.getTypeRoot()) {
             case CHAR:
             case VARCHAR:
@@ -280,8 +296,7 @@ public interface RowData {
                 fieldGetter = row -> row.getRow(fieldPos, rowFieldCount);
                 break;
             case DISTINCT_TYPE:
-                fieldGetter =
-                        createFieldGetter(((DistinctType) fieldType).getSourceType(), fieldPos);
+                fieldGetter = createFieldGetter(((DistinctType) fieldType).getSourceType(), fieldPos);
                 break;
             case RAW:
                 fieldGetter = row -> row.getRawValue(fieldPos);
@@ -304,7 +319,7 @@ public interface RowData {
     }
 
     /**
-     * Accessor for getting the field of a row during runtime.
+     * 用于在运行时获取行字段的访问器。
      *
      * @see #createFieldGetter(LogicalType, int)
      */
