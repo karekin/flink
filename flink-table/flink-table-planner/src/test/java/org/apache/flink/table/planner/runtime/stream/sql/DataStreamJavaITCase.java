@@ -50,9 +50,11 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.catalog.Column;
+import org.apache.flink.table.catalog.DefaultIndex;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.WatermarkSpec;
 import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.utils.ResolvedExpressionMock;
 import org.apache.flink.table.planner.factories.TestValuesTableFactory;
@@ -343,6 +345,7 @@ class DataStreamJavaITCase {
                                 .columnByMetadata("rowtime", "TIMESTAMP_LTZ(3)")
                                 // uses SQL expressions
                                 .watermark("rowtime", "SOURCE_WATERMARK()")
+                                .indexNamed("idx", Collections.singletonList("f0"))
                                 .build());
 
         testSchema(
@@ -364,7 +367,9 @@ class DataStreamJavaITCase {
                                         "rowtime",
                                         ResolvedExpressionMock.of(
                                                 TIMESTAMP_LTZ(3), "`SOURCE_WATERMARK`()"))),
-                        null));
+                        null,
+                        Collections.singletonList(
+                                DefaultIndex.newIndex("idx", Collections.singletonList("f0")))));
 
         tableEnv.createTemporaryView("t", table);
 
@@ -526,6 +531,8 @@ class DataStreamJavaITCase {
                         output(RowKind.INSERT, "alice", 1),
                         // --
                         input(RowKind.INSERT, "alice", 1), // no impact
+                        input(RowKind.UPDATE_AFTER, "alice", 1), // no impact
+                        input(RowKind.UPDATE_AFTER, "alice", 1), // no impact
                         // --
                         input(RowKind.UPDATE_AFTER, "alice", 2),
                         output(RowKind.UPDATE_BEFORE, "alice", 1),
@@ -564,6 +571,8 @@ class DataStreamJavaITCase {
                         output(RowKind.INSERT, "alice", 1),
                         // --
                         input(RowKind.INSERT, "alice", 1), // no impact
+                        input(RowKind.UPDATE_AFTER, "alice", 1), // no impact
+                        input(RowKind.UPDATE_AFTER, "alice", 1), // no impact
                         // --
                         input(RowKind.UPDATE_AFTER, "alice", 2),
                         output(RowKind.UPDATE_AFTER, "alice", 2),
@@ -577,6 +586,7 @@ class DataStreamJavaITCase {
                 tableEnv.fromChangelogStream(
                         changelogStream,
                         Schema.newBuilder().primaryKey("f0").build(),
+                        // produce partial deletes
                         ChangelogMode.upsert()));
 
         final Table result = tableEnv.sqlQuery("SELECT f0, SUM(f1) FROM t GROUP BY f0");
@@ -585,7 +595,8 @@ class DataStreamJavaITCase {
                 tableEnv.toChangelogStream(
                         result,
                         Schema.newBuilder().primaryKey("f0").build(),
-                        ChangelogMode.upsert()),
+                        // expect full deletes, therefore, require changelog normalize
+                        ChangelogMode.upsert(false)),
                 getOutput(inputOrOutput));
     }
 
@@ -613,6 +624,7 @@ class DataStreamJavaITCase {
                                 .column("f0", "TIMESTAMP(3)")
                                 .column("f1", "STRING")
                                 .watermark("f0", "SOURCE_WATERMARK()")
+                                .indexNamed("idx", Collections.singletonList("f0"))
                                 .build());
 
         testSchema(
@@ -629,7 +641,9 @@ class DataStreamJavaITCase {
                                         "f0",
                                         ResolvedExpressionMock.of(
                                                 TIMESTAMP(3), "`SOURCE_WATERMARK`()"))),
-                        null));
+                        null,
+                        Collections.singletonList(
+                                DefaultIndex.newIndex("idx", Collections.singletonList("f0")))));
 
         final DataStream<Long> rowtimeStream =
                 tableEnv.toDataStream(table)
@@ -1005,7 +1019,9 @@ class DataStreamJavaITCase {
                         RecursiveComparisonConfiguration.builder()
                                 .withComparatorForType(
                                         Comparator.comparing(
-                                                ResolvedExpression::asSerializableString),
+                                                resolvedExpression ->
+                                                        resolvedExpression.asSerializableString(
+                                                                DefaultSqlFactory.INSTANCE)),
                                         ResolvedExpression.class)
                                 .build())
                 .isEqualTo(table.getResolvedSchema());

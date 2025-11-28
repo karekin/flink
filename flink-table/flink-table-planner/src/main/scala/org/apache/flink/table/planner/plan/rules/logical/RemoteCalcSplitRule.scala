@@ -39,7 +39,7 @@ import scala.collection.mutable
  */
 abstract class RemoteCalcSplitRuleBase[T](
     description: String,
-    protected val callFinder: RemoteCalcCallFinder)
+    protected val callFinder: RemoteCallFinder)
   extends RelOptRule(operand(classOf[FlinkLogicalCalc], any), description) {
 
   // Consider the rules to be equal if they are the same class and their call finders are the same
@@ -72,9 +72,22 @@ abstract class RemoteCalcSplitRuleBase[T](
       callFinder)
 
     val splitComponents = split(program, splitter)
+
+    val topCalcProjects = splitComponents.topCalcProjects.map {
+      node: RexNode =>
+        {
+          val idx = extractedRexNodes.indexOf(node)
+          if (idx >= 0) {
+            new RexInputRef(extractedFunctionOffset + idx, node.getType)
+          } else {
+            node
+          }
+        }
+    }
+
     val accessedFields =
       extractRefInputFields(
-        splitComponents.topCalcProjects,
+        topCalcProjects,
         splitComponents.topCalcCondition,
         extractedFunctionOffset)
 
@@ -107,7 +120,7 @@ abstract class RemoteCalcSplitRuleBase[T](
       bottomCalc,
       RexProgram.create(
         bottomCalc.getRowType,
-        splitComponents.topCalcProjects.map(_.accept(inputRewriter)),
+        topCalcProjects.map(_.accept(inputRewriter)),
         splitComponents.topCalcCondition.map(_.accept(inputRewriter)).orNull,
         calc.getRowType,
         rexBuilder
@@ -169,7 +182,7 @@ class SplitComponents(
  * multiple [[FlinkLogicalCalc]]s. After this rule is applied, there will be no Remote functions in
  * the condition of the [[FlinkLogicalCalc]]s.
  */
-class RemoteCalcSplitConditionRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcSplitConditionRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase("RemoteCalcSplitConditionRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -197,7 +210,7 @@ class RemoteCalcSplitConditionRule(callFinder: RemoteCalcCallFinder)
 
 abstract class RemoteCalcSplitProjectionRuleBase[T](
     description: String,
-    callFinder: RemoteCalcCallFinder)
+    callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase[T](description, callFinder) {
 
   override def split(program: RexProgram, splitter: ScalarFunctionSplitter): SplitComponents = {
@@ -208,9 +221,7 @@ abstract class RemoteCalcSplitProjectionRuleBase[T](
   }
 }
 
-abstract class RemoteCalcSplitRexFieldRuleBase(
-    description: String,
-    callFinder: RemoteCalcCallFinder)
+abstract class RemoteCalcSplitRexFieldRuleBase(description: String, callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase(description, callFinder) {
 
   override def needConvert(
@@ -240,7 +251,7 @@ abstract class RemoteCalcSplitRexFieldRuleBase(
  * Rule that splits the RexField with the input of Remote function contained in the projection of
  * [[FlinkLogicalCalc]]s.
  */
-class RemoteCalcSplitProjectionRexFieldRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcSplitProjectionRexFieldRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRexFieldRuleBase("RemoteCalcSplitProjectionRexFieldRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -262,7 +273,7 @@ class RemoteCalcSplitProjectionRexFieldRule(callFinder: RemoteCalcCallFinder)
  * Rule that splits the RexField with the input of Remote function contained in the condition of
  * [[FlinkLogicalCalc]]s.
  */
-class RemoteCalcSplitConditionRexFieldRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcSplitConditionRexFieldRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRexFieldRuleBase("RemoteCalcSplitConditionRexFieldRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -286,7 +297,7 @@ class RemoteCalcSplitConditionRexFieldRule(callFinder: RemoteCalcCallFinder)
  * the projection into multiple [[FlinkLogicalCalc]]s. After this rule is applied, it will only
  * contain Remote functions or Java functions in the projection of each [[FlinkLogicalCalc]].
  */
-class RemoteCalcSplitProjectionRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcSplitProjectionRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitProjectionRuleBase("RemoteCalcSplitProjectionRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -312,7 +323,7 @@ class RemoteCalcSplitProjectionRule(callFinder: RemoteCalcCallFinder)
  * Rule that expands the RexFieldAccess inputs of Remote functions contained in the projection of
  * [[FlinkLogicalCalc]]s.
  */
-class RemoteCalcExpandProjectRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcExpandProjectRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase("RemoteCalcExpandProjectRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -348,7 +359,7 @@ class RemoteCalcExpandProjectRule(callFinder: RemoteCalcCallFinder)
  * Rule that pushes the condition of [[FlinkLogicalCalc]]s before it for the [[FlinkLogicalCalc]]s
  * which contain Remote functions in the projection.
  */
-class RemoteCalcPushConditionRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcPushConditionRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase("RemoteCalcPushConditionRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -381,7 +392,7 @@ class RemoteCalcPushConditionRule(callFinder: RemoteCalcCallFinder)
  * functions in the projection. This rule exists to keep implementations as simple as possible and
  * ensures that it only needs to handle the Remote function execution.
  */
-class RemoteCalcRewriteProjectionRule(callFinder: RemoteCalcCallFinder)
+class RemoteCalcRewriteProjectionRule(callFinder: RemoteCallFinder)
   extends RemoteCalcSplitRuleBase("RemoteCalcRewriteProjectionRule", callFinder) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
@@ -418,10 +429,12 @@ class ScalarFunctionSplitter(
     extractedFunctionOffset: Int,
     extractedRexNodes: mutable.ArrayBuffer[RexNode],
     needConvert: Function[RexNode, Boolean],
-    callFinder: RemoteCalcCallFinder)
+    callFinder: RemoteCallFinder)
   extends RexDefaultVisitor[RexNode] {
 
   private var fieldsRexCall: Map[Int, Int] = Map[Int, Int]()
+
+  private val extractedRexNodeRefs: mutable.HashSet[RexNode] = mutable.HashSet[RexNode]()
 
   override def visitCall(call: RexCall): RexNode = {
     if (needConvert(call)) {
@@ -443,7 +456,9 @@ class ScalarFunctionSplitter(
           new RexInputRef(field.getIndex, field.getType)
         case _ =>
           val newFieldAccess =
-            rexBuilder.makeFieldAccess(expr.accept(this), fieldAccess.getField.getIndex)
+            rexBuilder.makeFieldAccess(
+              convertInputRefToLocalRefIfNecessary(expr.accept(this)),
+              fieldAccess.getField.getIndex)
           getExtractedRexNode(newFieldAccess)
       }
     } else {
@@ -457,9 +472,18 @@ class ScalarFunctionSplitter(
 
   override def visitNode(rexNode: RexNode): RexNode = rexNode
 
+  private def convertInputRefToLocalRefIfNecessary(node: RexNode): RexNode = {
+    node match {
+      case inputRef: RexInputRef if extractedRexNodeRefs.contains(node) =>
+        new RexLocalRef(inputRef.getIndex, node.getType)
+      case _ => node
+    }
+  }
+
   private def getExtractedRexNode(node: RexNode): RexNode = {
     val newNode = new RexInputRef(extractedFunctionOffset + extractedRexNodes.length, node.getType)
     extractedRexNodes.append(node)
+    extractedRexNodeRefs.add(newNode)
     newNode
   }
 

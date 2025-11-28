@@ -25,7 +25,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>2.0-SNAPSHOT</version>
+		<version>2.3-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-docs</artifactId>
@@ -136,6 +136,11 @@ under the License.
 		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-statebackend-forst</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-python</artifactId>
 			<version>${project.version}</version>
 		</dependency>
@@ -180,6 +185,12 @@ under the License.
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-gateway</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-model-openai</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 

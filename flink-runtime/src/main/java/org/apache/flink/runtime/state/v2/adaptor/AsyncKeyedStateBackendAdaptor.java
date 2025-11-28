@@ -21,9 +21,12 @@ package org.apache.flink.runtime.state.v2.adaptor;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.api.common.state.InternalCheckpointListener;
 import org.apache.flink.api.common.state.v2.State;
+import org.apache.flink.api.common.state.v2.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.runtime.asyncprocessing.AsyncRequestContainer;
 import org.apache.flink.runtime.asyncprocessing.RecordContext;
 import org.apache.flink.runtime.asyncprocessing.StateExecutor;
+import org.apache.flink.runtime.asyncprocessing.StateRequest;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SnapshotType;
@@ -44,7 +47,6 @@ import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalReducingState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.v2.StateDescriptor;
 import org.apache.flink.runtime.state.v2.StateDescriptorUtils;
 import org.apache.flink.runtime.state.v2.internal.InternalKeyedState;
 
@@ -52,6 +54,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RunnableFuture;
 
 /**
@@ -111,7 +114,7 @@ public class AsyncKeyedStateBackendAdaptor<K> implements AsyncKeyedStateBackend<
     @Nonnull
     @Override
     public StateExecutor createStateExecutor() {
-        return null;
+        return new InvalidStateExecutor();
     }
 
     @Override
@@ -128,6 +131,11 @@ public class AsyncKeyedStateBackendAdaptor<K> implements AsyncKeyedStateBackend<
 
     @Override
     public void dispose() {}
+
+    @Override
+    public String getBackendTypeIdentifier() {
+        return keyedStateBackend.getBackendTypeIdentifier();
+    }
 
     @Override
     public void close() throws IOException {}
@@ -196,5 +204,34 @@ public class AsyncKeyedStateBackendAdaptor<K> implements AsyncKeyedStateBackend<
     @Override
     public boolean isSafeToReuseKVState() {
         return keyedStateBackend.isSafeToReuseKVState();
+    }
+
+    public CheckpointableKeyedStateBackend<K> getKeyedStateBackend() {
+        return keyedStateBackend;
+    }
+
+    private static class InvalidStateExecutor implements StateExecutor {
+
+        @Override
+        public CompletableFuture<Void> executeBatchRequests(
+                AsyncRequestContainer<StateRequest<?, ?, ?, ?>> asyncRequestContainer) {
+            return null;
+        }
+
+        @Override
+        public AsyncRequestContainer<StateRequest<?, ?, ?, ?>> createRequestContainer() {
+            return null;
+        }
+
+        @Override
+        public void executeRequestSync(StateRequest<?, ?, ?, ?> asyncRequest) {}
+
+        @Override
+        public boolean fullyLoaded() {
+            return false;
+        }
+
+        @Override
+        public void shutdown() {}
     }
 }

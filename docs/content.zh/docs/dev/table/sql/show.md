@@ -39,6 +39,8 @@ SHOW CREATE 语句用于打印给定对象的创建 DDL 语句。当前的 SHOW 
 - SHOW CURRENT DATABASE
 - SHOW TABLES
 - SHOW CREATE TABLE
+- SHOW MATERIALIZED TABLES
+- SHOW CREATE MATERIALIZED TABLE
 - SHOW COLUMNS
 - SHOW PARTITIONS
 - SHOW PROCEDURES
@@ -49,6 +51,8 @@ SHOW CREATE 语句用于打印给定对象的创建 DDL 语句。当前的 SHOW 
 - SHOW FULL MODULES
 - SHOW JARS
 - SHOW JOBS
+- SHOW MODELS
+- SHOW CREATE MODEL
 
 
 ## 执行 SHOW 语句
@@ -973,6 +977,29 @@ The syntax of sql pattern in `LIKE` clause is the same as that of `MySQL` dialec
 SHOW CREATE VIEW [catalog_name.][db_name.]view_name
 ```
 
+## SHOW MATERIALIZED TABLES
+
+```sql
+SHOW MATERIALIZED TABLES [ ( FROM | IN ) [catalog_name.]database_name ] [ [NOT] LIKE <sql_like_pattern> ]
+```
+
+Show all materialized tables for an optionally specified database. If no database is specified then the materialized tables are returned from the current database. Additionally, the output of this statement may be filtered by an optional matching pattern.
+
+**LIKE**
+Show all materialized tables with given materialized table name and optional `LIKE` clause, whose name is similar to the `<sql_like_pattern>`.
+
+The syntax of sql pattern in `LIKE` clause is the same as that of `MySQL` dialect.
+* `%` matches any number of characters, including zero characters, `\%` matches one `%` character.
+* `_` matches exactly one character, `\_` matches one `_` character.
+
+## SHOW CREATE MATERIALIZED TABLE
+
+```sql
+SHOW CREATE MATERIALIZED TABLE [catalog_name.][db_name.]materialized_table_name
+```
+
+Show create materialized table statement for specified materialized table.
+
 展示创建指定视图的 create 语句。
 
 ## SHOW FUNCTIONS
@@ -1027,5 +1054,60 @@ SHOW JOBS
 展示集群中所有作业。
 
 <span class="label label-danger">Attention</span> 当前 SHOW JOBS 命令只能在 [SQL CLI]({{< ref "docs/dev/table/sqlClient" >}}) 或者 [SQL Gateway]({{< ref "docs/dev/table/sql-gateway/overview" >}}) 中使用.
+
+## SHOW MODELS
+
+```sql
+SHOW MODELS [ ( FROM | IN ) [catalog_name.]database_name ] [ [NOT] (LIKE | ILIKE) <sql_like_pattern> ]
+```
+
+展示指定 catalog 和 database 下的所有模型。
+如果没有指定 catalog 和 database，则将使用当前 catalog 和当前 database。另外可以用 `<sql_like_pattern>` 来过滤要返回的模型。
+
+**LIKE**
+根据可选的 `LIKE` 语句与 `<sql_like_pattern>` 是否模糊匹配的所有模型。
+
+`LIKE` 子句中 SQL 正则式的语法与 `MySQL` 方言中的语法相同。
+* `%` 匹配任意数量的字符, 也包括0数量字符, `\%` 匹配一个 `%` 字符.
+* `_` 只匹配一个字符, `\_` 匹配一个 `_` 字符.
+
+**ILIKE**
+它的行为和 LIKE 相同，只是对于大小写是不敏感的。
+
+## SHOW CREATE MODEL
+
+```sql
+SHOW CREATE MODEL [[catalog_name.]db_name.]model_name
+```
+
+展示创建指定模型的 create 语句。
+
+该语句的输出内容包括模型名称、模型输入和输出、模型参数和配置信息，使您可以直观地了解相应模型的元数据。
+
+假设 `model1` 是按如下方式创建的：
+```sql
+CREATE MODEL my_model
+INPUT(text STRING)
+OUTPUT(response STRING)
+WITH (
+  'provider' = 'openai',
+);
+```
+
+展示模型创建语句：
+```sql
+show create model model1;
++---------------------------------------------------------------------------------------------+
+|                                                                                      result |
++---------------------------------------------------------------------------------------------+
+| CREATE MODEL `default_catalog`.`default_database`.`my_model` 
+  INPUT (`text` STRING)
+  OUTPUT (`response` STRING) WITH (
+    'provider' = 'openai'
+)
+ |
++---------------------------------------------------------------------------------------------+
+1 row in set
+```
 
 {{< top >}}

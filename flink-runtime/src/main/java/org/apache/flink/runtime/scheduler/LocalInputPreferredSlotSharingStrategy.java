@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -46,7 +47,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * belong to the same SlotSharingGroup, tend to be put in the same ExecutionSlotSharingGroup.
  * Co-location constraints will be respected.
  */
-class LocalInputPreferredSlotSharingStrategy extends AbstractSlotSharingStrategy {
+public class LocalInputPreferredSlotSharingStrategy extends AbstractSlotSharingStrategy {
 
     LocalInputPreferredSlotSharingStrategy(
             final SchedulingTopology topology,
@@ -55,7 +56,7 @@ class LocalInputPreferredSlotSharingStrategy extends AbstractSlotSharingStrategy
         super(topology, logicalSlotSharingGroups, coLocationGroups);
     }
 
-    static class Factory implements SlotSharingStrategy.Factory {
+    public static class Factory implements SlotSharingStrategy.Factory {
 
         public LocalInputPreferredSlotSharingStrategy create(
                 final SchedulingTopology topology,
@@ -168,7 +169,7 @@ class LocalInputPreferredSlotSharingStrategy extends AbstractSlotSharingStrategy
          */
         private Map<ExecutionVertexID, ExecutionSlotSharingGroup> build() {
             final LinkedHashMap<JobVertexID, List<SchedulingExecutionVertex>> allVertices =
-                    getExecutionVertices(topology);
+                    getExecutionVertices(topology, Function.identity());
 
             // loop on job vertices so that an execution vertex will not be added into a group
             // if that group better fits another execution vertex

@@ -35,6 +35,7 @@ import org.apache.flink.runtime.checkpoint.StateAssignmentOperation;
 import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.checkpoint.SubTaskInitializationMetricsBuilder;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
@@ -98,6 +99,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.streaming.api.operators.StreamOperatorUtils.setProcessingTimeService;
@@ -183,6 +185,11 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
     private boolean initializeCalled = false;
 
     private volatile boolean wasFailedExternally = false;
+
+    private long restoredCheckpointId = 0;
+
+    private Function<TypeSerializer<OUT>, Output<StreamRecord<OUT>>> outputCreator =
+            MockOutput::new;
 
     public AbstractStreamOperatorTestHarness(
             StreamOperator<OUT> operator, int maxParallelism, int parallelism, int subtaskIndex)
@@ -287,7 +294,6 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
 
         Configuration underlyingConfig = env.getTaskConfiguration();
         this.config = new StreamConfig(underlyingConfig);
-        this.config.setCheckpointingEnabled(true);
         this.config.setOperatorID(operatorID);
         this.config.setStateBackendUsesManagedMemory(true);
         this.config.setManagedMemoryFractionOperatorOfUseCase(
@@ -362,6 +368,11 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
         }
     }
 
+    public void setOutputCreator(
+            Function<TypeSerializer<OUT>, Output<StreamRecord<OUT>>> outputCreator) {
+        this.outputCreator = outputCreator;
+    }
+
     public void setCheckpointStorage(CheckpointStorage storage) {
         if (stateBackend instanceof CheckpointStorage) {
             return;
@@ -394,6 +405,10 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
 
     public StreamConfig getStreamConfig() {
         return config;
+    }
+
+    public void setRestoredCheckpointId(long restoredCheckpointId) {
+        this.restoredCheckpointId = restoredCheckpointId;
     }
 
     /** Get all the output from the task. This contains StreamRecords and Events interleaved. */
@@ -463,7 +478,7 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
                                         factory,
                                         mockTask,
                                         config,
-                                        new MockOutput(outputSerializer),
+                                        outputCreator.apply(outputSerializer),
                                         new OperatorEventDispatcherImpl(
                                                 this.getClass().getClassLoader(),
                                                 new NoOpTaskOperatorEventGateway()))
@@ -476,7 +491,7 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
                             (AbstractStreamOperator) operator,
                             mockTask,
                             config,
-                            new MockOutput(outputSerializer));
+                            outputCreator.apply(outputSerializer));
                 }
             }
             setupCalled = true;
@@ -613,16 +628,16 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
             jmTaskStateSnapshot.putSubtaskStateByOperatorID(
                     operator.getOperatorID(), jmOperatorStateHandles);
 
-            taskStateManager.setReportedCheckpointId(0);
+            taskStateManager.setReportedCheckpointId(restoredCheckpointId);
             taskStateManager.setJobManagerTaskStateSnapshotsByCheckpointId(
-                    Collections.singletonMap(0L, jmTaskStateSnapshot));
+                    Collections.singletonMap(restoredCheckpointId, jmTaskStateSnapshot));
 
             if (tmOperatorStateHandles != null) {
                 TaskStateSnapshot tmTaskStateSnapshot = new TaskStateSnapshot();
                 tmTaskStateSnapshot.putSubtaskStateByOperatorID(
                         operator.getOperatorID(), tmOperatorStateHandles);
                 taskStateManager.setTaskManagerTaskStateSnapshotsByCheckpointId(
-                        Collections.singletonMap(0L, tmTaskStateSnapshot));
+                        Collections.singletonMap(restoredCheckpointId, tmTaskStateSnapshot));
             }
         }
 
@@ -746,7 +761,7 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
                         checkpointStorageAccess.resolveCheckpointStorageLocation(
                                 checkpointId, locationReference));
 
-        return new OperatorSnapshotFinalizer(operatorStateResult);
+        return OperatorSnapshotFinalizer.create(operatorStateResult);
     }
 
     /**
@@ -865,6 +880,11 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
         @Override
         public void emitRecordAttributes(RecordAttributes recordAttributes) {
             outputList.add(recordAttributes);
+        }
+
+        @Override
+        public void emitWatermark(WatermarkEvent watermark) {
+            outputList.add(watermark);
         }
 
         @Override

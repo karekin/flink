@@ -99,6 +99,8 @@ public class StreamNode implements Serializable {
 
     private final Map<Integer, StreamConfig.InputRequirement> inputRequirements = new HashMap<>();
 
+    private @Nullable Map<String, String> additionalMetricVariables;
+
     private @Nullable IntermediateDataSetID consumeClusterDatasetId;
 
     private boolean supportsConcurrentExecutionAttempts = true;
@@ -274,7 +276,6 @@ public class StreamNode implements Serializable {
         this.bufferTimeout = bufferTimeout;
     }
 
-    @VisibleForTesting
     public StreamOperator<?> getOperator() {
         assert operatorFactory != null && operatorFactory instanceof SimpleOperatorFactory;
         return (StreamOperator<?>) ((SimpleOperatorFactory) operatorFactory).getOperator();
@@ -407,6 +408,14 @@ public class StreamNode implements Serializable {
 
     public Map<Integer, StreamConfig.InputRequirement> getInputRequirements() {
         return inputRequirements;
+    }
+
+    public @Nullable Map<String, String> getAdditionalMetricVariables() {
+        return additionalMetricVariables;
+    }
+
+    public void setAdditionalMetricVariables(Map<String, String> additionalMetricVariables) {
+        this.additionalMetricVariables = additionalMetricVariables;
     }
 
     public Optional<OperatorCoordinator.Provider> getCoordinatorProvider(

@@ -709,6 +709,16 @@ public class TaskManagerOptions {
                                                     code(TaskManagerLoadBalanceMode.SLOTS.name()),
                                                     code("TaskManagers")),
                                             text(
+                                                    "The %s mode tries to allocate slots on minimum number of available %s.",
+                                                    code(
+                                                            TaskManagerLoadBalanceMode.MIN_RESOURCES
+                                                                    .name()),
+                                                    code("TaskManagers")),
+                                            text(
+                                                    "The %s mode tries to schedule evenly tasks across all available %s with in the job scope based the number of tasks.",
+                                                    code(TaskManagerLoadBalanceMode.TASKS.name()),
+                                                    code("TaskManagers")),
+                                            text(
                                                     "The %s mode is the default mode without any specified strategy.",
                                                     code(TaskManagerLoadBalanceMode.NONE.name())))
                                     .build());
@@ -754,7 +764,9 @@ public class TaskManagerOptions {
     /** Type of {@link TaskManagerOptions#TASK_MANAGER_LOAD_BALANCE_MODE}. */
     public enum TaskManagerLoadBalanceMode {
         NONE,
-        SLOTS
+        SLOTS,
+        MIN_RESOURCES,
+        TASKS
     }
 
     // ------------------------------------------------------------------------

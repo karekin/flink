@@ -18,12 +18,14 @@
 
 package org.apache.flink.runtime.state;
 
+import org.apache.flink.annotation.Experimental;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.util.Disposable;
 
+import java.util.List;
 import java.util.stream.Stream;
 
 /**
@@ -75,11 +77,19 @@ public interface KeyedStateBackend<K>
 
     /**
      * @return A stream of all keys for the given state and namespace. Modifications to the state
-     *     during iterating over it keys are not supported.
+     *     during iterating over its keys are not supported.
      * @param state State variable for which existing keys will be returned.
      * @param namespace Namespace for which existing keys will be returned.
      */
     <N> Stream<K> getKeys(String state, N namespace);
+
+    /**
+     * @return A stream of all keys for the multiple states and a given namespace. Modifications to
+     *     the states during iterating over its keys are not supported.
+     * @param states State variables for which existing keys will be returned.
+     * @param namespace Namespace for which existing keys will be returned.
+     */
+    <N> Stream<K> getKeys(List<String> states, N namespace);
 
     /**
      * @return A stream of all keys for the given state and namespace. Modifications to the state
@@ -156,6 +166,13 @@ public interface KeyedStateBackend<K>
     default boolean isSafeToReuseKVState() {
         return false;
     }
+
+    /**
+     * @return fixed lower-case string identifying the type of the underlying state backend, e.g.
+     *     rocksdb, hashmap, forst, batch.
+     */
+    @Experimental
+    String getBackendTypeIdentifier();
 
     /** Listener is given a callback when {@link #setCurrentKey} is called (key context changes). */
     @FunctionalInterface

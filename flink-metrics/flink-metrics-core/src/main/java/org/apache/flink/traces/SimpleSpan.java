@@ -20,7 +20,10 @@ package org.apache.flink.traces;
 
 import org.apache.flink.annotation.Internal;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Basic implementation of {@link Span}. */
@@ -31,21 +34,24 @@ public class SimpleSpan implements Span {
     private final String name;
 
     private final HashMap<String, Object> attributes = new HashMap<>();
-    private long startTsMillis;
-    private long endTsMillis;
+    private final List<Span> children = new ArrayList<>();
+    private final long startTsMillis;
+    private final long endTsMillis;
 
     public SimpleSpan(
             String scope,
             String name,
             long startTsMillis,
             long endTsMillis,
-            HashMap<String, Object> attributes) {
+            HashMap<String, Object> attributes,
+            List<Span> children) {
 
         this.scope = scope;
         this.name = name;
         this.startTsMillis = startTsMillis;
         this.endTsMillis = endTsMillis;
         this.attributes.putAll(attributes);
+        this.children.addAll(children);
     }
 
     @Override
@@ -74,6 +80,11 @@ public class SimpleSpan implements Span {
     }
 
     @Override
+    public List<Span> getChildren() {
+        return Collections.unmodifiableList(children);
+    }
+
+    @Override
     public String toString() {
         return SimpleSpan.class.getSimpleName()
                 + "{"
@@ -87,6 +98,8 @@ public class SimpleSpan implements Span {
                 + endTsMillis
                 + ", attributes="
                 + attributes
+                + ", children="
+                + children
                 + "}";
     }
 }

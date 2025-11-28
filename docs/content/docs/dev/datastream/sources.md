@@ -54,6 +54,16 @@ The Data Source API supports both unbounded streaming sources and bounded batch 
 
 The difference between both cases is minimal: In the bounded/batch case, the enumerator generates a fixed set of splits, and each split is necessarily finite. In the unbounded streaming case, one of the two is not true (splits are not finite, or the enumerator keeps generating new splits).
 
+
+**Split Reassignment On Recovery**
+
+Under normal circumstances, once the *SplitEnumerator* assigns *Splits* to *SourceReaders*, these *splits* are not reassigned to other readers again. When the source is recovering from a failure, the *splits* from the saved state will be added back to the readers immediately.
+
+When a source implements the {{< gh_link file="flink-core/src/main/java/org/apache/flink/api/connector/source/SupportsSplitReassignmentOnRecovery.java" name="SupportsSplitReassignmentOnRecovery" >}} interface, the recovery process behaves differently.
+On Recovery, instead of immediately reassigning the *splits* back to the same *SourceReaders*, all *splits* are collected and added back to the *SplitEnumerator*.
+The *SplitEnumerator* then takes responsibility for redistributing these *splits* among the available *SourceReaders* in a balanced manner.
+This mechanism enables more flexible and efficient recovery by allowing the central *SplitEnumerator* to make informed decisions about split distribution.
+
 #### Examples
 
 Here are some simplified conceptual examples to illustrate how the data source components interact, in streaming and batch cases.
@@ -197,19 +207,6 @@ DataStream<Integer> stream = env.fromSource(
 ...
 ```
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-val env = StreamExecutionEnvironment.getExecutionEnvironment()
-
-val mySource = new MySource(...)
-
-val stream = env.fromSource(
-      mySource,
-      WatermarkStrategy.noWatermarks(),
-      "MySourceName")
-...
-```
-{{< /tab >}}
 {{< tab "Python" >}}
 ```python
 env = StreamExecutionEnvironment.get_execution_environment()
@@ -253,9 +250,14 @@ It is quite common that a `SourceReader` implementation does the following:
   - Handle the synchronization between the internal fetching threads and other methods invocations such as `pollNext(ReaderOutput)`.
   - Maintain the per split watermark for watermark alignment.
   - Maintain the state of each split for checkpoint.
+  - Limit the rate of record emitting.
   
 In order to reduce the work of writing a new `SourceReader`, Flink provides a {{< gh_link file="flink-connectors/flink-connector-base/src/main/java/org/apache/flink/connector/base/source/reader/SourceReaderBase.java" name="SourceReaderBase" >}} class to serve as a base implementation of the `SourceReader`. 
 `SourceReaderBase` has all the above work done out of the box. To write a new `SourceReader`, one can just let the `SourceReader` implementation inherit from the `SourceReaderBase`, fill in a few methods and implement a high level {{< gh_link file="flink-connectors/flink-connector-base/src/main/java/org/apache/flink/connector/base/source/reader/splitreader/SplitReader.java" name="SplitReader" >}}.
+
+#### Rate Limiting
+User can limit the record emitting rate by passing a {{< javadoc name="RateLimiterStrategy" file="org/apache/flink/api/connector/source/util/ratelimit/RateLimiterStrategy.html">}} to the constructor of `SourceReaderBase`.
+By default, rate limiting is not applied in SourceReaderBase.
 
 ### SplitFetcherManager
 
@@ -368,10 +370,6 @@ The `SourceReader` implementations can also implement their own threading model 
 ## Event Time and Watermarks
 
 *Event Time* assignment and *Watermark Generation* happen as part of the data sources. The event streams leaving the Source Readers have event timestamps and (during streaming execution) contain watermarks. See [Timely Stream Processing]({{< ref "docs/concepts/time" >}}) for an introduction to Event Time and Watermarks.
-
-{{< hint warning >}}
-Applications based on the legacy {{< gh_link file="flink-streaming-java/src/main/java/org/apache/flink/streaming/api/functions/source/SourceFunction.java" name="SourceFunction" >}} typically generate timestamps and watermarks in a separate later step via `stream.assignTimestampsAndWatermarks(WatermarkStrategy)`. This function should not be used with the new sources, because timestamps will be already assigned, and it will override the previous split-aware watermarks.
-{{< /hint >}}
 
 #### API
 

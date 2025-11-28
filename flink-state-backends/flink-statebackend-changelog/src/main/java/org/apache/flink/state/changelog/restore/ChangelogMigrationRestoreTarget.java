@@ -48,6 +48,7 @@ import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.RunnableFuture;
 import java.util.stream.Stream;
 
@@ -228,6 +229,11 @@ public class ChangelogMigrationRestoreTarget<K> implements ChangelogRestoreTarge
             }
 
             @Override
+            public <N> Stream<K> getKeys(List<String> states, N namespace) {
+                return keyedStateBackend.getKeys(states, namespace);
+            }
+
+            @Override
             public <N> Stream<Tuple2<K, N>> getKeysAndNamespaces(String state) {
                 return keyedStateBackend.getKeysAndNamespaces(state);
             }
@@ -292,6 +298,11 @@ public class ChangelogMigrationRestoreTarget<K> implements ChangelogRestoreTarge
             public void dispose() {
                 keyedStateBackend.dispose();
                 changelogStateFactory.dispose();
+            }
+
+            @Override
+            public String getBackendTypeIdentifier() {
+                return keyedStateBackend.getBackendTypeIdentifier();
             }
         };
     }

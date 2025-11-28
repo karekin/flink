@@ -36,11 +36,13 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.DoubleSerializer;
 import org.apache.flink.api.common.typeutils.base.FloatSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.GenericTypeInfo;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
@@ -49,7 +51,10 @@ import org.apache.flink.api.java.typeutils.runtime.kryo.JavaSerializer;
 import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateLatencyTrackOptions;
+import org.apache.flink.configuration.StateSizeTrackOptions;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.core.testutils.CheckedThread;
 import org.apache.flink.core.testutils.OneShotLatch;
@@ -61,6 +66,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.StateAssignmentOperation;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.query.KvStateRegistry;
@@ -82,7 +88,7 @@ import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.StateMigrationException;
 
-import org.apache.flink.shaded.guava32.com.google.common.base.Joiner;
+import org.apache.flink.shaded.guava33.com.google.common.base.Joiner;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
@@ -125,11 +131,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 import static org.assertj.core.api.Assumptions.assumeThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 
 /**
  * Tests for the {@link KeyedStateBackend} and {@link OperatorStateBackend} as produced by various
@@ -311,6 +312,51 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
             assertThat(
                             ((AbstractKeyedStateBackend<Integer>) nested)
                                     .getLatencyTrackingStateConfig()
+                                    .isEnabled())
+                    .isTrue();
+        } finally {
+            IOUtils.closeQuietly(keyedStateBackend);
+            keyedStateBackend.dispose();
+        }
+    }
+
+    @TestTemplate
+    void testEnableStateSizeTracking() throws Exception {
+        ConfigurableStateBackend stateBackend = getStateBackend();
+        Configuration config = new Configuration();
+        config.set(StateSizeTrackOptions.SIZE_TRACK_ENABLED, true);
+        StateBackend configuredBackend =
+                stateBackend.configure(config, Thread.currentThread().getContextClassLoader());
+        KeyGroupRange groupRange = new KeyGroupRange(0, 1);
+        JobID jobID = new JobID();
+        int numberOfKeyGroups = groupRange.getNumberOfKeyGroups();
+        TaskKvStateRegistry kvStateRegistry = env.getTaskKvStateRegistry();
+        CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
+        CheckpointableKeyedStateBackend<Integer> keyedStateBackend =
+                configuredBackend.createKeyedStateBackend(
+                        new KeyedStateBackendParametersImpl<>(
+                                env,
+                                jobID,
+                                "test_op",
+                                IntSerializer.INSTANCE,
+                                numberOfKeyGroups,
+                                groupRange,
+                                kvStateRegistry,
+                                TtlTimeProvider.DEFAULT,
+                                getMetricGroup(),
+                                getCustomInitializationMetrics(),
+                                Collections.emptyList(),
+                                cancelStreamRegistry,
+                                1.0d));
+        try {
+            KeyedStateBackend<Integer> nested =
+                    keyedStateBackend instanceof TestableKeyedStateBackend
+                            ? ((TestableKeyedStateBackend<Integer>) keyedStateBackend)
+                                    .getDelegatedKeyedStateBackend(true)
+                            : keyedStateBackend;
+            assertThat(
+                            ((AbstractKeyedStateBackend<Integer>) nested)
+                                    .getSizeTrackingStateConfig()
                                     .isEnabled())
                     .isTrue();
         } finally {
@@ -4542,7 +4588,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
         try {
             KeyGroupRange expectedKeyGroupRange = backend.getKeyGroupRange();
 
-            KvStateRegistryListener listener = mock(KvStateRegistryListener.class);
+            final TestingKvStateRegistryListener listener = new TestingKvStateRegistryListener();
             registry.registerListener(HighAvailabilityServices.DEFAULT_JOB_ID, listener);
 
             ValueStateDescriptor<Integer> desc =
@@ -4553,13 +4599,13 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                     VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, desc);
 
             // Verify registered
-            verify(listener, times(1))
-                    .notifyKvStateRegistered(
-                            eq(env.getJobID()),
-                            eq(env.getJobVertexId()),
-                            eq(expectedKeyGroupRange),
-                            eq("banana"),
-                            any(KvStateID.class));
+            assertThat(
+                            listener.isRegistered(
+                                    env.getJobID(),
+                                    env.getJobVertexId(),
+                                    expectedKeyGroupRange,
+                                    "banana"))
+                    .isTrue();
 
             KeyedStateHandle snapshot =
                     runSnapshot(
@@ -4572,13 +4618,15 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
             backend.dispose();
 
-            verify(listener, times(1))
-                    .notifyKvStateUnregistered(
-                            eq(env.getJobID()),
-                            eq(env.getJobVertexId()),
-                            eq(expectedKeyGroupRange),
-                            eq("banana"));
+            assertThat(
+                            listener.isRegistered(
+                                    env.getJobID(),
+                                    env.getJobVertexId(),
+                                    expectedKeyGroupRange,
+                                    "banana"))
+                    .isFalse();
             backend.dispose();
+
             // Initialize again
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot, env);
             if (snapshot != null) {
@@ -4589,13 +4637,13 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                     VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, desc);
 
             // Verify registered again
-            verify(listener, times(2))
-                    .notifyKvStateRegistered(
-                            eq(env.getJobID()),
-                            eq(env.getJobVertexId()),
-                            eq(expectedKeyGroupRange),
-                            eq("banana"),
-                            any(KvStateID.class));
+            assertThat(
+                            listener.isRegistered(
+                                    env.getJobID(),
+                                    env.getJobVertexId(),
+                                    expectedKeyGroupRange,
+                                    "banana"))
+                    .isTrue();
         } finally {
             IOUtils.closeQuietly(backend);
             backend.dispose();
@@ -5391,6 +5439,95 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
         return jobManagerOwnedSnapshot;
     }
 
+    @TestTemplate
+    public void testMapStateWithNullValue() throws Exception {
+        CheckpointableKeyedStateBackend<String> keyedBackend =
+                createKeyedBackend(new NullUnsafeTypeSerializer());
+        MapStateDescriptor<Integer, String> kvId =
+                new MapStateDescriptor<>(
+                        "id", IntSerializer.INSTANCE, new NullUnsafeTypeSerializer());
+        MapState<Integer, String> state =
+                keyedBackend.getPartitionedState(
+                        VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, kvId);
+
+        String key = "key";
+        int userKey = 1;
+        keyedBackend.setCurrentKey(key);
+        // this should not throw an exception
+        state.put(userKey, null);
+        assertThat(state.contains(userKey)).isTrue();
+        assertThat(state.get(userKey)).isNull();
+    }
+
+    /**
+     * A test utility serializer that simulates the behavior of built-in Flink serializers which do
+     * not support null values.
+     *
+     * <p>Many core serializers in Flink, such as {@link
+     * org.apache.flink.api.common.typeutils.base.IntSerializer} and {@link
+     * org.apache.flink.api.common.typeutils.base.BooleanSerializer}, are designed to be null-unsafe
+     * and will throw a {@link NullPointerException} if they encounter a null value.
+     */
+    private static class NullUnsafeTypeSerializer extends TypeSerializerSingleton<String> {
+
+        private static final long serialVersionUID = 1L;
+
+        private final StringSerializer stringSerializer = new StringSerializer();
+
+        @Override
+        public boolean isImmutableType() {
+            return stringSerializer.isImmutableType();
+        }
+
+        @Override
+        public String createInstance() {
+            return stringSerializer.createInstance();
+        }
+
+        @Override
+        public String copy(String from) {
+            return stringSerializer.copy(from);
+        }
+
+        @Override
+        public String copy(String from, String reuse) {
+            return stringSerializer.copy(from, reuse);
+        }
+
+        @Override
+        public int getLength() {
+            return stringSerializer.getLength();
+        }
+
+        @Override
+        public void serialize(String record, DataOutputView target) throws IOException {
+            if (record == null) {
+                throw new NullPointerException("This serializer cannot serialize nulls.");
+            }
+            stringSerializer.serialize(record, target);
+        }
+
+        @Override
+        public String deserialize(DataInputView source) throws IOException {
+            return stringSerializer.deserialize(source);
+        }
+
+        @Override
+        public String deserialize(String reuse, DataInputView source) throws IOException {
+            return stringSerializer.deserialize(reuse, source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            stringSerializer.copy(source, target);
+        }
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return stringSerializer.snapshotConfiguration();
+        }
+    }
+
     public static class TestPojo implements Serializable {
         private String strField;
         private Integer intField;
@@ -5694,6 +5831,50 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
     public static final class MutableLong {
         long value;
+    }
+
+    private static class TestingKvStateRegistryListener implements KvStateRegistryListener {
+
+        private final Map<String, KvStateID> registeredStates = new HashMap<>();
+
+        private String createKey(
+                JobID jobId,
+                JobVertexID jobVertexId,
+                KeyGroupRange keyGroupRange,
+                String registrationName) {
+            return String.format(
+                    "%s-%s-%s-%s",
+                    jobId, jobVertexId, keyGroupRange.prettyPrintInterval(), registrationName);
+        }
+
+        private boolean isRegistered(
+                JobID jobId,
+                JobVertexID jobVertexId,
+                KeyGroupRange keyGroupRange,
+                String registrationName) {
+            return registeredStates.containsKey(
+                    createKey(jobId, jobVertexId, keyGroupRange, registrationName));
+        }
+
+        @Override
+        public void notifyKvStateRegistered(
+                JobID jobId,
+                JobVertexID jobVertexId,
+                KeyGroupRange keyGroupRange,
+                String registrationName,
+                KvStateID kvStateId) {
+            registeredStates.put(
+                    createKey(jobId, jobVertexId, keyGroupRange, registrationName), kvStateId);
+        }
+
+        @Override
+        public void notifyKvStateUnregistered(
+                JobID jobId,
+                JobVertexID jobVertexId,
+                KeyGroupRange keyGroupRange,
+                String registrationName) {
+            registeredStates.remove(createKey(jobId, jobVertexId, keyGroupRange, registrationName));
+        }
     }
 
     private MockEnvironment buildMockEnv() throws Exception {

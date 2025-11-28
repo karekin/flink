@@ -19,20 +19,19 @@
 package org.apache.flink.runtime.deployment;
 
 import org.apache.flink.runtime.executiongraph.IndexRange;
-import org.apache.flink.runtime.executiongraph.IndexRangeUtil;
-import org.apache.flink.runtime.executiongraph.IntermediateResult;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
+import org.apache.flink.runtime.scheduler.strategy.ConsumedPartitionGroup;
 
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
+import static org.apache.flink.runtime.executiongraph.IndexRangeUtil.mergeIndexRanges;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
@@ -79,8 +78,10 @@ class ConsumedSubpartitionContext implements Serializable {
     }
 
     public Collection<IndexRange> getConsumedShuffleDescriptorRanges() {
+        // The original consumed shuffle descriptors may have overlaps, we need to deduplicate it
+        // by merging.
         return Collections.unmodifiableCollection(
-                consumedShuffleDescriptorToSubpartitionRangeMap.keySet());
+                mergeIndexRanges(consumedShuffleDescriptorToSubpartitionRangeMap.keySet()));
     }
 
     public IndexRange getConsumedSubpartitionRange(int shuffleDescriptorIndex) {
@@ -97,7 +98,7 @@ class ConsumedSubpartitionContext implements Serializable {
             }
         }
         List<IndexRange> mergedConsumedSubpartitionRanges =
-                IndexRangeUtil.mergeIndexRanges(consumedSubpartitionRanges);
+                mergeIndexRanges(consumedSubpartitionRanges);
         checkState(
                 mergedConsumedSubpartitionRanges.size() == 1,
                 "Illegal consumed subpartition range for shuffle descriptor index "
@@ -113,21 +114,27 @@ class ConsumedSubpartitionContext implements Serializable {
      *
      * @param consumedSubpartitionGroups a mapping of consumed partition index ranges to
      *     subpartition ranges.
-     * @param consumedResultPartitions an iterator of {@link IntermediateResultPartitionID} for the
-     *     consumed result partitions.
-     * @param partitions all partition ids of consumed {@link IntermediateResult}.
+     * @param consumedPartitionGroup partition group consumed by the task.
+     * @param partitionIdRetriever a function that retrieves the {@link
+     *     IntermediateResultPartitionID} for a given index.
      * @return a {@link ConsumedSubpartitionContext} instance constructed from the input parameters.
      */
     public static ConsumedSubpartitionContext buildConsumedSubpartitionContext(
             Map<IndexRange, IndexRange> consumedSubpartitionGroups,
-            Iterator<IntermediateResultPartitionID> consumedResultPartitions,
-            IntermediateResultPartitionID[] partitions) {
-        Map<IntermediateResultPartitionID, Integer> partitionIdToShuffleDescriptorIndexMap =
-                new HashMap<>();
-        while (consumedResultPartitions.hasNext()) {
-            IntermediateResultPartitionID partitionId = consumedResultPartitions.next();
-            partitionIdToShuffleDescriptorIndexMap.put(
-                    partitionId, partitionIdToShuffleDescriptorIndexMap.size());
+            ConsumedPartitionGroup consumedPartitionGroup,
+            Function<Integer, IntermediateResultPartitionID> partitionIdRetriever) {
+        Map<IntermediateResultPartitionID, Integer> resultPartitionsInOrder =
+                consumedPartitionGroup.getResultPartitionsInOrder();
+        // If only one range is included and the index range size is the same as the number of
+        // shuffle descriptors, it means that the task will subscribe to all partitions, i.e., the
+        // partition range is one-to-one corresponding to the shuffle descriptors. Therefore, we can
+        // directly construct the ConsumedSubpartitionContext using the subpartition range.
+        if (consumedSubpartitionGroups.size() == 1
+                && consumedSubpartitionGroups.keySet().iterator().next().size()
+                        == resultPartitionsInOrder.size()) {
+            return buildConsumedSubpartitionContext(
+                    resultPartitionsInOrder.size(),
+                    consumedSubpartitionGroups.values().iterator().next());
         }
 
         Map<IndexRange, IndexRange> consumedShuffleDescriptorToSubpartitionRangeMap =
@@ -135,12 +142,13 @@ class ConsumedSubpartitionContext implements Serializable {
         for (Map.Entry<IndexRange, IndexRange> entry : consumedSubpartitionGroups.entrySet()) {
             IndexRange partitionRange = entry.getKey();
             IndexRange subpartitionRange = entry.getValue();
+            // The shuffle descriptor index is consistent with the index in resultPartitionsInOrder.
             IndexRange shuffleDescriptorRange =
                     new IndexRange(
-                            partitionIdToShuffleDescriptorIndexMap.get(
-                                    partitions[partitionRange.getStartIndex()]),
-                            partitionIdToShuffleDescriptorIndexMap.get(
-                                    partitions[partitionRange.getEndIndex()]));
+                            resultPartitionsInOrder.get(
+                                    partitionIdRetriever.apply(partitionRange.getStartIndex())),
+                            resultPartitionsInOrder.get(
+                                    partitionIdRetriever.apply(partitionRange.getEndIndex())));
             checkState(
                     partitionRange.size() == shuffleDescriptorRange.size()
                             && !consumedShuffleDescriptorToSubpartitionRangeMap.containsKey(
@@ -153,8 +161,7 @@ class ConsumedSubpartitionContext implements Serializable {
         // merging.
         int numConsumedShuffleDescriptors = 0;
         List<IndexRange> mergedConsumedShuffleDescriptor =
-                IndexRangeUtil.mergeIndexRanges(
-                        consumedShuffleDescriptorToSubpartitionRangeMap.keySet());
+                mergeIndexRanges(consumedShuffleDescriptorToSubpartitionRangeMap.keySet());
         for (IndexRange range : mergedConsumedShuffleDescriptor) {
             numConsumedShuffleDescriptors += range.size();
         }

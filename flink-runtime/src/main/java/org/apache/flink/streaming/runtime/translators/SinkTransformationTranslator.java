@@ -26,6 +26,7 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.connector.sink2.SupportsCommitter;
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessageTypeInfo;
@@ -54,6 +55,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -71,9 +73,6 @@ import static org.apache.flink.util.Preconditions.checkState;
 @Internal
 public class SinkTransformationTranslator<Input, Output>
         implements TransformationTranslator<Output, SinkTransformation<Input, Output>> {
-
-    private static final String COMMITTER_NAME = "Committer";
-    private static final String WRITER_NAME = "Writer";
 
     @Override
     public Collection<Integer> translateForBatch(
@@ -170,7 +169,7 @@ public class SinkTransformationTranslator<Input, Output>
                         prewritten,
                         input ->
                                 input.transform(
-                                        WRITER_NAME,
+                                        ConfigConstants.WRITER_NAME,
                                         CommittableMessageTypeInfo.noOutput(),
                                         new SinkWriterOperatorFactory<>(sink)),
                         false,
@@ -225,7 +224,9 @@ public class SinkTransformationTranslator<Input, Output>
 
             // check all transformation after the writer and recursively disable UC for all inputs
             // up to the writer
-            Set<Integer> seen = new HashSet<>(writer.getId());
+            Set<Integer> seen = new HashSet<>(sinkTransformations.size() * 2);
+            seen.add(writer.getId());
+
             Queue<Transformation<?>> pending =
                     new ArrayDeque<>(
                             sinkTransformations.subList(
@@ -284,7 +285,7 @@ public class SinkTransformationTranslator<Input, Output>
                             precommitted,
                             pc ->
                                     pc.transform(
-                                            COMMITTER_NAME,
+                                            ConfigConstants.COMMITTER_NAME,
                                             committableTypeInformation,
                                             new CommitterOperatorFactory<>(
                                                     committingSink,
@@ -315,7 +316,7 @@ public class SinkTransformationTranslator<Input, Output>
                             inputStream,
                             input ->
                                     input.transform(
-                                            WRITER_NAME,
+                                            ConfigConstants.WRITER_NAME,
                                             typeInformation,
                                             new SinkWriterOperatorFactory<>(sink)),
                             false,
@@ -383,15 +384,18 @@ public class SinkTransformationTranslator<Input, Output>
 
                 // Set the operator uid hashes to support stateful upgrades without prior uids
                 setOperatorUidHashIfPossible(
-                        subTransformation, WRITER_NAME, operatorsUidHashes.getWriterUidHash());
+                        subTransformation,
+                        ConfigConstants.WRITER_NAME,
+                        operatorsUidHashes.getWriterUidHash());
                 setOperatorUidHashIfPossible(
                         subTransformation,
-                        COMMITTER_NAME,
+                        ConfigConstants.COMMITTER_NAME,
                         operatorsUidHashes.getCommitterUidHash());
                 setOperatorUidHashIfPossible(
                         subTransformation,
                         StandardSinkTopologies.GLOBAL_COMMITTER_TRANSFORMATION_NAME,
                         operatorsUidHashes.getGlobalCommitterUidHash());
+                setAdditionalMetricVariablesForWriter(subTransformation);
 
                 concatUid(subTransformation, subTransformation.getName());
 
@@ -464,6 +468,19 @@ public class SinkTransformationTranslator<Input, Output>
             return result;
         }
 
+        /**
+         * Only writer inherits additional metric variables, as writer's metrics like number of
+         * records in, busyness, etc. are the most representative of "sink's" metrics.
+         */
+        private void setAdditionalMetricVariablesForWriter(Transformation<?> subTransformation) {
+            Map<String, String> additionalMetricVariables =
+                    transformation.getAdditionalMetricVariables();
+            if (additionalMetricVariables != null
+                    && subTransformation.getName().equals(ConfigConstants.WRITER_NAME)) {
+                additionalMetricVariables.forEach(subTransformation::addMetricVariable);
+            }
+        }
+
         private void setOperatorUidHashIfPossible(
                 Transformation<?> transformation,
                 String writerName,
@@ -479,14 +496,14 @@ public class SinkTransformationTranslator<Input, Output>
             if (transformationName != null && transformation.getUid() != null) {
                 // Use the same uid pattern than for Sink V1. We deliberately decided to use the uid
                 // pattern of Flink 1.13 because 1.14 did not have a dedicated committer operator.
-                if (transformationName.equals(COMMITTER_NAME)) {
+                if (transformationName.equals(ConfigConstants.COMMITTER_NAME)) {
                     final String committerFormat = "Sink Committer: %s";
                     subTransformation.setUid(
                             String.format(committerFormat, transformation.getUid()));
                     return;
                 }
                 // Set the writer operator uid to the sinks uid to support state migrations
-                if (transformationName.equals(WRITER_NAME)) {
+                if (transformationName.equals(ConfigConstants.WRITER_NAME)) {
                     subTransformation.setUid(transformation.getUid());
                     return;
                 }

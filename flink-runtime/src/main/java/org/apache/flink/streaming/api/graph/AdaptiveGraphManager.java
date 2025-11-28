@@ -28,9 +28,11 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.forwardgroup.ForwardGroupComputeUtil;
 import org.apache.flink.runtime.jobgraph.forwardgroup.StreamNodeForwardGroup;
+import org.apache.flink.runtime.jobgraph.jsonplan.JsonPlanGenerator;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.streaming.api.graph.util.JobVertexBuildContext;
 import org.apache.flink.streaming.api.graph.util.OperatorChainInfo;
+import org.apache.flink.streaming.api.transformations.StreamExchangeMode;
 import org.apache.flink.streaming.runtime.partitioner.ForwardForConsecutiveHashPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.ForwardForUnspecifiedPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.ForwardPartitioner;
@@ -74,7 +76,8 @@ import static org.apache.flink.streaming.api.graph.StreamingJobGraphGenerator.va
 
 /** Default implementation for {@link AdaptiveGraphGenerator}. */
 @Internal
-public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
+public class AdaptiveGraphManager
+        implements AdaptiveGraphGenerator, StreamGraphContext.StreamGraphUpdateListener {
 
     private final StreamGraph streamGraph;
 
@@ -128,12 +131,19 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
     // We need cache all job vertices to create JobEdge for downstream vertex.
     private final Map<Integer, JobVertex> startNodeToJobVertexMap;
 
+    private final Map<Integer, JobVertexID> streamNodeIdsToJobVertexMap;
+
     // Records the ID of the job vertex that has completed execution.
     private final Set<JobVertexID> finishedJobVertices;
+
+    // Records the ID of the stream nodes that has completed execution.
+    private final Set<Integer> finishedStreamNodeIds;
 
     private final AtomicBoolean hasHybridResultPartition;
 
     private final SlotSharingGroup defaultSlotSharingGroup;
+
+    private String streamGraphJson;
 
     public AdaptiveGraphManager(
             ClassLoader userClassloader, StreamGraph streamGraph, Executor serializationExecutor) {
@@ -162,8 +172,10 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
 
         this.jobVertexToStartNodeMap = new HashMap<>();
         this.jobVertexToChainedStreamNodeIdsMap = new HashMap<>();
+        this.streamNodeIdsToJobVertexMap = new HashMap<>();
 
         this.finishedJobVertices = new HashSet<>();
+        this.finishedStreamNodeIds = new HashSet<>();
 
         this.streamGraphContext =
                 new DefaultStreamGraphContext(
@@ -171,7 +183,10 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
                         steamNodeIdToForwardGroupMap,
                         frozenNodeToStartNodeMap,
                         intermediateOutputsCaches,
-                        consumerEdgeIdToIntermediateDataSetMap);
+                        consumerEdgeIdToIntermediateDataSetMap,
+                        finishedStreamNodeIds,
+                        userClassloader,
+                        this);
 
         this.jobGraph = createAndInitializeJobGraph(streamGraph, streamGraph.getJobID());
 
@@ -198,6 +213,10 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
             streamNodes.add(streamGraph.getStreamNode(outEdge.getTargetId()));
         }
         return createJobVerticesAndUpdateGraph(streamNodes);
+    }
+
+    public void addFinishedStreamNodeIds(List<Integer> finishedStreamNodeIds) {
+        this.finishedStreamNodeIds.addAll(finishedStreamNodeIds);
     }
 
     /**
@@ -294,6 +313,8 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
         recordCreatedJobVerticesInfo(jobVertexBuildContext);
 
         generateConfigForJobVertices(jobVertexBuildContext);
+
+        generateStreamGraphJson();
 
         return new ArrayList<>(jobVertexBuildContext.getJobVerticesInOrder().values());
     }
@@ -438,6 +459,7 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
                                         .computeIfAbsent(
                                                 jobVertex.getID(), key -> new ArrayList<>())
                                         .add(node.getId());
+                                streamNodeIdsToJobVertexMap.put(node.getId(), jobVertex.getID());
                             });
         }
     }
@@ -597,6 +619,20 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
                                     streamGraph.getStreamNode(edge.getSourceId()), streamGraph))
                     || isChainable(edge, streamGraph)) {
                 edge.setPartitioner(new ForwardPartitioner<>());
+
+                // ForwardForConsecutiveHashPartitioner may use BATCH exchange mode, which prevents
+                // operator chaining. To enable chaining for edges using this partitioner, we need
+                // to set their exchange mode to UNDEFINED.
+                if (partitioner instanceof ForwardForConsecutiveHashPartitioner
+                        && edge.getExchangeMode() == StreamExchangeMode.BATCH) {
+                    edge.setExchangeMode(StreamExchangeMode.UNDEFINED);
+                }
+
+                // Currently, there is no intra input key correlation for edge with
+                // ForwardForUnspecifiedPartitioner, and we need to modify it to false.
+                if (partitioner instanceof ForwardForUnspecifiedPartitioner) {
+                    edge.setIntraInputKeyCorrelated(false);
+                }
             }
         }
     }
@@ -660,5 +696,19 @@ public class AdaptiveGraphManager implements AdaptiveGraphGenerator {
 
     private Integer getStartNodeId(Integer streamNodeId) {
         return frozenNodeToStartNodeMap.get(streamNodeId);
+    }
+
+    private void generateStreamGraphJson() {
+        streamGraphJson =
+                JsonPlanGenerator.generateStreamGraphJson(streamGraph, streamNodeIdsToJobVertexMap);
+    }
+
+    public String getStreamGraphJson() {
+        return streamGraphJson;
+    }
+
+    @Override
+    public void onStreamGraphUpdated() {
+        generateStreamGraphJson();
     }
 }

@@ -30,7 +30,6 @@ under the License.
 The sections below describe how to import the Flink project into an IDE
 for the development of Flink itself. For writing Flink programs, please
 refer to the [Java API]({{< ref "docs/dev/configuration/overview" >}})
-and the [Scala API]({{< ref "docs/dev/configuration/overview" >}})
 quickstart guides.
 
 {{< hint info >}}
@@ -214,7 +213,7 @@ You can verify your setup by running some of the Python tests located in flink-p
 
 This section lists issues that developers have run into in the past when working with IntelliJ.
 
-#### Compilation fails with `invalid flag: --add-exports=java.base/sun.net.util=ALL-UNNAMED`
+#### Compilation fails with `invalid flag: --add-exports=java.management/sun.management=ALL-UNNAMED`
 
 This happens if the "java11" Maven profile is active, but an older JDK version is used. Go to
 "View" → "Tool Windows" → "Maven" and uncheck the "java11" profile. Afterwards, reimport the

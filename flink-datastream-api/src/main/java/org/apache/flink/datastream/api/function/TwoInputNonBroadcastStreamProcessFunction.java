@@ -19,6 +19,8 @@
 package org.apache.flink.datastream.api.function;
 
 import org.apache.flink.annotation.Experimental;
+import org.apache.flink.api.common.watermark.Watermark;
+import org.apache.flink.api.common.watermark.WatermarkHandlingResult;
 import org.apache.flink.datastream.api.common.Collector;
 import org.apache.flink.datastream.api.context.NonPartitionedContext;
 import org.apache.flink.datastream.api.context.PartitionedContext;
@@ -45,7 +47,7 @@ public interface TwoInputNonBroadcastStreamProcessFunction<IN1, IN2, OUT> extend
      * @param output to emit processed records.
      * @param ctx runtime context in which this function is executed.
      */
-    void processRecordFromFirstInput(IN1 record, Collector<OUT> output, PartitionedContext ctx)
+    void processRecordFromFirstInput(IN1 record, Collector<OUT> output, PartitionedContext<OUT> ctx)
             throws Exception;
 
     /**
@@ -55,8 +57,8 @@ public interface TwoInputNonBroadcastStreamProcessFunction<IN1, IN2, OUT> extend
      * @param output to emit processed records.
      * @param ctx runtime context in which this function is executed.
      */
-    void processRecordFromSecondInput(IN2 record, Collector<OUT> output, PartitionedContext ctx)
-            throws Exception;
+    void processRecordFromSecondInput(
+            IN2 record, Collector<OUT> output, PartitionedContext<OUT> ctx) throws Exception;
 
     /**
      * This is a life-cycle method indicates that this function will no longer receive any data from
@@ -64,7 +66,7 @@ public interface TwoInputNonBroadcastStreamProcessFunction<IN1, IN2, OUT> extend
      *
      * @param ctx the context in which this function is executed.
      */
-    default void endFirstInput(NonPartitionedContext<OUT> ctx) {}
+    default void endFirstInput(NonPartitionedContext<OUT> ctx) throws Exception {}
 
     /**
      * This is a life-cycle method indicates that this function will no longer receive any data from
@@ -72,7 +74,7 @@ public interface TwoInputNonBroadcastStreamProcessFunction<IN1, IN2, OUT> extend
      *
      * @param ctx the context in which this function is executed.
      */
-    default void endSecondInput(NonPartitionedContext<OUT> ctx) {}
+    default void endSecondInput(NonPartitionedContext<OUT> ctx) throws Exception {}
 
     /**
      * Callback for processing timer.
@@ -81,5 +83,32 @@ public interface TwoInputNonBroadcastStreamProcessFunction<IN1, IN2, OUT> extend
      * @param output to emit record.
      * @param ctx runtime context in which this function is executed.
      */
-    default void onProcessingTimer(long timestamp, Collector<OUT> output, PartitionedContext ctx) {}
+    default void onProcessingTimer(
+            long timestamp, Collector<OUT> output, PartitionedContext<OUT> ctx) throws Exception {}
+
+    /**
+     * Callback function when receive the watermark from the first input.
+     *
+     * @param watermark to process.
+     * @param output to emit record.
+     * @param ctx runtime context in which this function is executed.
+     */
+    default WatermarkHandlingResult onWatermarkFromFirstInput(
+            Watermark watermark, Collector<OUT> output, NonPartitionedContext<OUT> ctx)
+            throws Exception {
+        return WatermarkHandlingResult.PEEK;
+    }
+
+    /**
+     * Callback function when receive the watermark from the second input.
+     *
+     * @param watermark to process.
+     * @param output to emit record.
+     * @param ctx runtime context in which this function is executed.
+     */
+    default WatermarkHandlingResult onWatermarkFromSecondInput(
+            Watermark watermark, Collector<OUT> output, NonPartitionedContext<OUT> ctx)
+            throws Exception {
+        return WatermarkHandlingResult.PEEK;
+    }
 }

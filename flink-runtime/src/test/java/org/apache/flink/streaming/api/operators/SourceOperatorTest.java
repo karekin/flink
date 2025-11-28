@@ -23,6 +23,7 @@ import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.connector.source.mocks.MockSourceReader;
 import org.apache.flink.api.connector.source.mocks.MockSourceSplit;
 import org.apache.flink.api.connector.source.mocks.MockSourceSplitSerializer;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.network.api.StopMode;
 import org.apache.flink.runtime.operators.coordination.MockOperatorEventGateway;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
@@ -42,20 +43,26 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.streaming.util.CollectorOutput;
+import org.apache.flink.streaming.util.MockOutput;
 import org.apache.flink.util.CollectionUtil;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
 /** Unit test for {@link SourceOperator}. */
 @SuppressWarnings("serial")
@@ -95,24 +102,46 @@ class SourceOperatorTest {
                 .isNotNull();
     }
 
-    @Test
-    void testOpen() throws Exception {
-        // Initialize the operator.
-        operator.initializeState(context.createStateContext());
-        // Open the operator.
-        operator.open();
-        // The source reader should have been assigned a split.
-        assertThat(mockSourceReader.getAssignedSplits())
-                .containsExactly(SourceOperatorTestContext.MOCK_SPLIT);
-        // The source reader should have started.
-        assertThat(mockSourceReader.isStarted()).isTrue();
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testOpen(boolean supportsSplitReassignmentOnRecovery) throws Exception {
+        try (SourceOperatorTestContext context =
+                new SourceOperatorTestContext(
+                        false,
+                        false,
+                        WatermarkStrategy.noWatermarks(),
+                        new MockOutput<>(new ArrayList<>()),
+                        supportsSplitReassignmentOnRecovery)) {
+            SourceOperator<Integer, MockSourceSplit> operator = context.getOperator();
+            // Initialize the operator.
+            operator.initializeState(context.createStateContext());
+            // Open the operator.
+            operator.open();
+            // The source reader should have been assigned a split.
+            if (supportsSplitReassignmentOnRecovery) {
+                assertThat(context.getSourceReader().getAssignedSplits()).isEmpty();
+            } else {
+                assertThat(context.getSourceReader().getAssignedSplits())
+                        .containsExactly(SourceOperatorTestContext.MOCK_SPLIT);
+            }
 
-        // A ReaderRegistrationRequest should have been sent.
-        assertThat(mockGateway.getEventsSent()).hasSize(1);
-        OperatorEvent operatorEvent = mockGateway.getEventsSent().get(0);
-        assertThat(operatorEvent).isInstanceOf(ReaderRegistrationEvent.class);
-        assertThat(((ReaderRegistrationEvent) operatorEvent).subtaskId())
-                .isEqualTo(SourceOperatorTestContext.SUBTASK_INDEX);
+            // The source reader should have started.
+            assertThat(context.getSourceReader().isStarted()).isTrue();
+
+            // A ReaderRegistrationRequest should have been sent.
+            assertThat(context.getGateway().getEventsSent()).hasSize(1);
+            OperatorEvent operatorEvent = context.getGateway().getEventsSent().get(0);
+            assertThat(operatorEvent).isInstanceOf(ReaderRegistrationEvent.class);
+            ReaderRegistrationEvent registrationEvent = (ReaderRegistrationEvent) operatorEvent;
+            assertThat(registrationEvent.subtaskId())
+                    .isEqualTo(SourceOperatorTestContext.SUBTASK_INDEX);
+            if (supportsSplitReassignmentOnRecovery) {
+                assertThat(registrationEvent.splits(new MockSourceSplitSerializer()))
+                        .containsExactly(SourceOperatorTestContext.MOCK_SPLIT);
+            } else {
+                assertThat(registrationEvent.splits(new MockSourceSplitSerializer())).isEmpty();
+            }
+        }
     }
 
     @Test
@@ -206,7 +235,8 @@ class SourceOperatorTest {
                         false,
                         WatermarkStrategy.<Integer>forMonotonousTimestamps()
                                 .withTimestampAssigner((element, recordTimestamp) -> element),
-                        new CollectorOutput<>(outputStreamElements));
+                        new CollectorOutput<>(outputStreamElements),
+                        false);
         operator = context.getOperator();
         operator.initializeState(context.createStateContext());
         operator.open();
@@ -232,6 +262,76 @@ class SourceOperatorTest {
                         new StreamRecord<>(1001, 1001),
                         new Watermark(1000),
                         new RecordAttributes(false));
+    }
+
+    @Test
+    public void testMetricGroupIsCreatedForNewSplit() throws Exception {
+        operator.initializeState(context.createStateContext());
+        operator.open();
+        MockSourceSplit newSplit = new MockSourceSplit((2));
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(
+                        Collections.singletonList(newSplit), new MockSourceSplitSerializer()));
+        assertNotNull(operator.getSplitMetricGroup(newSplit.splitId()));
+    }
+
+    @Test
+    public void testMetricGroupIsCreatedForRestoredSplit() throws Exception {
+        MockSourceSplit restoredSplit = new MockSourceSplit((1));
+        StateInitializationContext stateContext =
+                context.createStateContext(Collections.singletonList(restoredSplit));
+        operator.initializeState(stateContext);
+        operator.open();
+        assertNotNull(operator.getSplitMetricGroup(restoredSplit.splitId()));
+    }
+
+    @Test
+    public void testMetricGroupTracksSplitWatermark() throws Exception {
+        long expectedWatermark = 1000;
+        operator.initializeState(context.createStateContext());
+        operator.open();
+        MockSourceSplit split = new MockSourceSplit((2));
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(
+                        Collections.singletonList(split), new MockSourceSplitSerializer()));
+        operator.updateCurrentSplitWatermark(split.splitId(), expectedWatermark);
+        assertEquals(
+                expectedWatermark,
+                operator.getSplitMetricGroup(split.splitId()).getCurrentWatermark());
+    }
+
+    @Test
+    public void testMetricGroupReturnsDefaultIfNoSplitWatermark() throws Exception {
+        long expectedWatermark = Watermark.UNINITIALIZED.getTimestamp();
+        operator.initializeState(context.createStateContext());
+        operator.open();
+        MockSourceSplit split = new MockSourceSplit((2));
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(
+                        Collections.singletonList(split), new MockSourceSplitSerializer()));
+        assertEquals(
+                expectedWatermark,
+                operator.getSplitMetricGroup(split.splitId()).getCurrentWatermark());
+    }
+
+    @Test
+    public void testMultipleMetricGroupsReturnWatermarkOrDefaultWatermark() throws Exception {
+        long expectedWatermarkValueForSplit0 = Watermark.UNINITIALIZED.getTimestamp();
+        long expectedWatermarkValueForSplit1 = 1000;
+        operator.initializeState(context.createStateContext());
+        operator.open();
+        MockSourceSplit split0 = new MockSourceSplit((19));
+        MockSourceSplit split1 = new MockSourceSplit((11));
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(
+                        Arrays.asList(split0, split1), new MockSourceSplitSerializer()));
+        operator.updateCurrentSplitWatermark(split1.splitId(), expectedWatermarkValueForSplit1);
+        assertEquals(
+                expectedWatermarkValueForSplit0,
+                operator.getSplitMetricGroup(split0.splitId()).getCurrentWatermark());
+        assertEquals(
+                expectedWatermarkValueForSplit1,
+                operator.getSplitMetricGroup(split1.splitId()).getCurrentWatermark());
     }
 
     private static class DataOutputToOutput<T> implements PushingAsyncDataInput.DataOutput<T> {
@@ -265,6 +365,11 @@ class SourceOperatorTest {
         @Override
         public void emitRecordAttributes(RecordAttributes recordAttributes) throws Exception {
             output.emitRecordAttributes(recordAttributes);
+        }
+
+        @Override
+        public void emitWatermark(WatermarkEvent watermark) throws Exception {
+            output.emitWatermark(watermark);
         }
     }
 }

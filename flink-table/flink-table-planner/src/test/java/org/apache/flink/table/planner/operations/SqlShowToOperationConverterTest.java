@@ -27,22 +27,29 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-public class SqlShowToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
+class SqlShowToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
 
     @BeforeEach
-    public void before() throws TableAlreadyExistException, DatabaseNotExistException {
+    void before() throws TableAlreadyExistException, DatabaseNotExistException {
         // Do nothing
         // No need to create schema, tables and etc. since the test executes for unset catalog and
         // database
     }
 
     @AfterEach
-    public void after() throws TableNotExistException {
+    void after() throws TableNotExistException {
         // Do nothing
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SHOW TABLES", "SHOW VIEWS", "SHOW FUNCTIONS", "SHOW PROCEDURES"})
+    @ValueSource(
+            strings = {
+                "SHOW TABLES",
+                "SHOW VIEWS",
+                "SHOW FUNCTIONS",
+                "SHOW PROCEDURES",
+                "SHOW MATERIALIZED TABLES"
+            })
     void testParseShowFunctionForUnsetCatalog(String sql) {
         catalogManager.setCurrentCatalog(null);
         // No exception should be thrown during parsing.
@@ -51,7 +58,14 @@ public class SqlShowToOperationConverterTest extends SqlNodeToOperationConversio
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SHOW TABLES", "SHOW VIEWS", "SHOW FUNCTIONS", "SHOW PROCEDURES"})
+    @ValueSource(
+            strings = {
+                "SHOW TABLES",
+                "SHOW VIEWS",
+                "SHOW FUNCTIONS",
+                "SHOW PROCEDURES",
+                "SHOW MATERIALIZED TABLES"
+            })
     void testParseShowFunctionForUnsetDatabase(String sql) {
         catalogManager.setCurrentDatabase(null);
         // No exception should be thrown during parsing.

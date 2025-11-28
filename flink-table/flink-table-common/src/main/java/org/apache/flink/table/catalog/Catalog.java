@@ -43,7 +43,6 @@ import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.factories.DynamicTableFactory;
 import org.apache.flink.table.factories.Factory;
 import org.apache.flink.table.factories.FunctionDefinitionFactory;
-import org.apache.flink.table.legacy.factories.TableFactory;
 import org.apache.flink.table.procedures.Procedure;
 
 import javax.annotation.Nullable;
@@ -84,20 +83,6 @@ public interface Catalog {
      * used.
      */
     default Optional<Factory> getFactory() {
-        return Optional.empty();
-    }
-
-    /**
-     * Get an optional {@link TableFactory} instance that's responsible for generating table-related
-     * instances stored in this catalog, instances such as source/sink.
-     *
-     * @return an optional TableFactory instance
-     * @deprecated Use {@link #getFactory()} for the new factory stack. The new factory stack uses
-     *     the new table sources and sinks defined in FLIP-95 and a slightly different discovery
-     *     mechanism.
-     */
-    @Deprecated
-    default Optional<TableFactory> getTableFactory() {
         return Optional.empty();
     }
 
@@ -229,13 +214,13 @@ public interface Catalog {
     void alterDatabase(String name, CatalogDatabase newDatabase, boolean ignoreIfNotExists)
             throws DatabaseNotExistException, CatalogException;
 
-    // ------ tables and views ------
+    // ------ tables, views and materialized tables ------
 
     /**
-     * Get names of all tables and views under this database. An empty list is returned if none
-     * exists.
+     * Get names of all tables, views and materialized tables under this database. An empty list is
+     * returned if none exists.
      *
-     * @return a list of the names of all tables and views in this database
+     * @return a list of the names of all tables, views and materialized tables in this database
      * @throws DatabaseNotExistException if the database does not exist
      * @throws CatalogException in case of any runtime exception
      */
@@ -250,6 +235,23 @@ public interface Catalog {
      * @throws CatalogException in case of any runtime exception
      */
     List<String> listViews(String databaseName) throws DatabaseNotExistException, CatalogException;
+
+    /**
+     * Get names of all materialized tables under this database. An empty list is returned if none
+     * exists.
+     *
+     * @param databaseName the name of the given database
+     * @return a list of the names of all materialized tables in the given database
+     * @throws DatabaseNotExistException if the database does not exist
+     * @throws CatalogException in case of any runtime exception
+     */
+    default List<String> listMaterializedTables(String databaseName)
+            throws DatabaseNotExistException, CatalogException {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "listMaterializedTables(String) is not implemented for %s.",
+                        this.getClass()));
+    }
 
     /**
      * Returns a {@link CatalogTable} or {@link CatalogView} identified by the given {@link
@@ -377,16 +379,6 @@ public interface Catalog {
             boolean ignoreIfNotExists)
             throws TableNotExistException, CatalogException {
         alterTable(tablePath, newTable, ignoreIfNotExists);
-    }
-
-    /**
-     * If true, tables which do not specify a connector will be translated to managed tables.
-     *
-     * @deprecated This method will be removed soon. Please see FLIP-346 for more details.
-     */
-    @Deprecated
-    default boolean supportsManagedTable() {
-        return false;
     }
 
     // ------ partitions ------
@@ -914,5 +906,30 @@ public interface Catalog {
                 String.format(
                         "alterModel(ObjectPath, CatalogModel, boolean) is not implemented for %s.",
                         this.getClass()));
+    }
+
+    /**
+     * Modifies an existing model.
+     *
+     * <p>The framework will make sure to call this method with fully validated {@link
+     * ResolvedCatalogModel}. Those instances are easy to serialize for a durable catalog
+     * implementation.
+     *
+     * @param modelPath path of the model to be modified
+     * @param newModel the new model definition
+     * @param modelChanges changes to describe the modification between the newModel and the
+     *     original model
+     * @param ignoreIfNotExists flag to specify behavior when the model does not exist: if set to
+     *     false, throw an exception, if set to true, do nothing.
+     * @throws ModelNotExistException if the model does not exist
+     * @throws CatalogException in case of any runtime exception
+     */
+    default void alterModel(
+            ObjectPath modelPath,
+            CatalogModel newModel,
+            List<ModelChange> modelChanges,
+            boolean ignoreIfNotExists)
+            throws ModelNotExistException, CatalogException {
+        alterModel(modelPath, newModel, ignoreIfNotExists);
     }
 }

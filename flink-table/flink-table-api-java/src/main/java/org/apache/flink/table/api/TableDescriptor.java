@@ -85,16 +85,6 @@ public class TableDescriptor {
         return descriptorBuilder;
     }
 
-    /**
-     * Creates a new {@link Builder} for a managed table.
-     *
-     * @deprecated This method will be removed soon. Please see FLIP-346 for more details.
-     */
-    @Deprecated
-    public static Builder forManaged() {
-        return new Builder();
-    }
-
     // ---------------------------------------------------------------------------------------------
 
     public Optional<Schema> getSchema() {
@@ -154,12 +144,14 @@ public class TableDescriptor {
                         .map(EncodingUtils::escapeIdentifier)
                         .collect(Collectors.joining(", "));
 
-        final String distributedBy = distribution == null ? "" : distribution.toString();
+        final String distributedBy = distribution == null ? "" : distribution + "\n";
 
         final String partitionedBy =
                 !partitionKeys.isEmpty()
-                        ? String.format("PARTITIONED BY (%s)", escapedPartitionKeys)
+                        ? String.format("PARTITIONED BY (%s)", escapedPartitionKeys) + "\n"
                         : "";
+
+        final String commentStr = comment == null ? "" : "COMMENT '" + comment + "'\n";
 
         final String serializedOptions =
                 options.entrySet().stream()
@@ -172,9 +164,9 @@ public class TableDescriptor {
                         .collect(Collectors.joining(String.format(",%n")));
 
         return String.format(
-                "%s%nCOMMENT '%s'%n%s%s%nWITH (%n%s%n)",
+                "%s%n%s%s%sWITH (%n%s%n)",
                 schema != null ? schema : "",
-                comment != null ? comment : "",
+                commentStr,
                 distributedBy,
                 partitionedBy,
                 serializedOptions);

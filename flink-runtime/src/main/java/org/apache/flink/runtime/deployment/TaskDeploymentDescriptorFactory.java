@@ -53,7 +53,6 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -113,7 +112,7 @@ public class TaskDeploymentDescriptorFactory {
     public TaskDeploymentDescriptor createDeploymentDescriptor(
             Execution execution,
             AllocationID allocationID,
-            @Nullable JobManagerTaskRestore taskRestore,
+            @Nullable Either<SerializedValue<JobManagerTaskRestore>, PermanentBlobKey> taskRestore,
             Collection<ResultPartitionDeploymentDescriptor> producedPartitions)
             throws IOException, ClusterDatasetCorruptedException {
         final ExecutionVertex executionVertex = execution.getVertex();
@@ -125,7 +124,7 @@ public class TaskDeploymentDescriptorFactory {
                         executionVertex.getJobVertex().getTaskInformationOrBlobKey()),
                 execution.getAttemptId(),
                 allocationID,
-                taskRestore,
+                taskRestore != null ? getSerializedTaskRestore(taskRestore) : null,
                 new ArrayList<>(producedPartitions),
                 createInputGateDeploymentDescriptors(executionVertex));
     }
@@ -151,6 +150,7 @@ public class TaskDeploymentDescriptorFactory {
 
             IntermediateDataSetID resultId = consumedIntermediateResult.getId();
             ResultPartitionType partitionType = consumedIntermediateResult.getResultType();
+            IntermediateResultPartition[] partitions = consumedIntermediateResult.getPartitions();
 
             inputGates.add(
                     new InputGateDeploymentDescriptor(
@@ -160,10 +160,8 @@ public class TaskDeploymentDescriptorFactory {
                                     executionVertex
                                             .getExecutionVertexInputInfo(resultId)
                                             .getConsumedSubpartitionGroups(),
-                                    consumedPartitionGroup.iterator(),
-                                    Arrays.stream(consumedIntermediateResult.getPartitions())
-                                            .map(IntermediateResultPartition::getPartitionId)
-                                            .toArray(IntermediateResultPartitionID[]::new)),
+                                    consumedPartitionGroup,
+                                    index -> partitions[index].getPartitionId()),
                             consumedPartitionGroup.size(),
                             getConsumedPartitionShuffleDescriptors(
                                     consumedIntermediateResult,
@@ -295,6 +293,13 @@ public class TaskDeploymentDescriptorFactory {
         return taskInfo.isLeft()
                 ? new TaskDeploymentDescriptor.NonOffloaded<>(taskInfo.left())
                 : new TaskDeploymentDescriptor.Offloaded<>(taskInfo.right());
+    }
+
+    private static MaybeOffloaded<JobManagerTaskRestore> getSerializedTaskRestore(
+            Either<SerializedValue<JobManagerTaskRestore>, PermanentBlobKey> either) {
+        return either.isLeft()
+                ? new TaskDeploymentDescriptor.NonOffloaded<>(either.left())
+                : new TaskDeploymentDescriptor.Offloaded<>(either.right());
     }
 
     public static ShuffleDescriptor getConsumedPartitionShuffleDescriptor(

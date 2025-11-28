@@ -22,9 +22,12 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.state.forst.fs.ForStFlinkFileSystem;
 import org.apache.flink.state.forst.fs.StringifiedForStFileSystem;
 import org.apache.flink.util.FileUtils;
@@ -40,7 +43,6 @@ import org.forstdb.Filter;
 import org.forstdb.FlinkEnv;
 import org.forstdb.IndexType;
 import org.forstdb.PlainTableConfig;
-import org.forstdb.Priority;
 import org.forstdb.ReadOptions;
 import org.forstdb.Statistics;
 import org.forstdb.TableFormatConfig;
@@ -71,31 +73,22 @@ import static org.apache.flink.state.forst.ForStOptions.CACHE_SIZE_BASE_LIMIT;
 public final class ForStResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ForStResourceContainer.class);
 
-    public static final String DB_DIR_STRING = "db";
-
     private static final String FORST_RELOCATE_LOG_SUFFIX = "_LOG";
 
     // the filename length limit is 255 on most operating systems
     // In rocksdb, if db_log_dir is non empty, the log files will be in the specified dir,
     // and the db data dir's absolute path will be used as the log file name's prefix.
-    private static final int INSTANCE_PATH_LENGTH_LIMIT =
-            255 / 2 - FORST_RELOCATE_LOG_SUFFIX.length();
+    private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - FORST_RELOCATE_LOG_SUFFIX.length();
 
-    @Nullable private FlinkEnv flinkEnv = null;
+    private final ForStPathContainer pathContainer;
 
-    @Nullable private final Path remoteBasePath;
-
-    @Nullable private final Path remoteForStPath;
-
-    @Nullable private final Path localBasePath;
-
-    @Nullable private final Path localForStPath;
+    private boolean remotePathNewlyCreated;
 
     @Nullable private Path cacheBasePath;
 
-    private long cacheCapacity;
+    private final long cacheCapacity;
 
-    private long cacheReservedSize;
+    private final long cacheReservedSize;
 
     /** The configurations from file. */
     private final ReadableConfig configuration;
@@ -120,46 +113,72 @@ public final class ForStResourceContainer implements AutoCloseable {
 
     @Nullable private java.nio.file.Path relocatedDbLogBaseDir;
 
+    /** The metric group for reporting metrics. */
+    @Nullable private final MetricGroup metricGroup;
+
     @VisibleForTesting
     public ForStResourceContainer() {
-        this(new Configuration(), null, null, null, null, false);
+        this(
+                new Configuration(),
+                null,
+                null,
+                ForStPathContainer.empty(),
+                RecoveryClaimMode.DEFAULT,
+                null,
+                null,
+                false);
     }
 
     @VisibleForTesting
     public ForStResourceContainer(@Nullable ForStOptionsFactory optionsFactory) {
-        this(new Configuration(), optionsFactory, null, null, null, false);
+        this(
+                new Configuration(),
+                optionsFactory,
+                null,
+                ForStPathContainer.empty(),
+                RecoveryClaimMode.DEFAULT,
+                null,
+                null,
+                false);
     }
 
     @VisibleForTesting
     public ForStResourceContainer(
             @Nullable ForStOptionsFactory optionsFactory,
             @Nullable OpaqueMemoryResource<ForStSharedResources> sharedResources) {
-        this(new Configuration(), optionsFactory, sharedResources, null, null, false);
+        this(
+                new Configuration(),
+                optionsFactory,
+                sharedResources,
+                ForStPathContainer.empty(),
+                RecoveryClaimMode.DEFAULT,
+                null,
+                null,
+                false);
     }
 
     public ForStResourceContainer(
             ReadableConfig configuration,
             @Nullable ForStOptionsFactory optionsFactory,
             @Nullable OpaqueMemoryResource<ForStSharedResources> sharedResources,
-            @Nullable Path localBasePath,
-            @Nullable Path remoteBasePath,
+            ForStPathContainer pathContainer,
+            RecoveryClaimMode claimMode,
+            @Nullable CheckpointStorageAccess checkpointStorageAccess,
+            MetricGroup metricGroup,
             boolean enableStatistics) {
 
         this.configuration = configuration;
         this.optionsFactory = optionsFactory;
         this.sharedResources = sharedResources;
 
-        this.localBasePath = localBasePath;
-        this.localForStPath = localBasePath != null ? new Path(localBasePath, DB_DIR_STRING) : null;
-        this.remoteBasePath = remoteBasePath;
-        this.remoteForStPath =
-                remoteBasePath != null ? new Path(remoteBasePath, DB_DIR_STRING) : null;
+        this.pathContainer = pathContainer;
 
         this.enableStatistics = enableStatistics;
         this.handlesToClose = new ArrayList<>();
         this.cacheBasePath = configuration.getOptional(CACHE_DIRECTORY).map(Path::new).orElse(null);
-        this.cacheCapacity = configuration.get(CACHE_SIZE_BASE_LIMIT);
-        this.cacheReservedSize = configuration.get(CACHE_RESERVED_SIZE);
+        this.cacheCapacity = configuration.get(CACHE_SIZE_BASE_LIMIT).getBytes();
+        this.cacheReservedSize = configuration.get(CACHE_RESERVED_SIZE).getBytes();
+        this.metricGroup = metricGroup;
     }
 
     /** Gets the ForSt {@link DBOptions} to be used for ForSt instances. */
@@ -193,12 +212,13 @@ public final class ForStResourceContainer implements AutoCloseable {
         // TODO: Fallback to checkpoint directory when checkpoint feature is ready if not
         // configured,
         //  fallback to local directory currently temporarily.
-        if (remoteForStPath != null) {
-            flinkEnv =
+        if (pathContainer.getRemoteForStPath() != null) {
+            FlinkEnv flinkEnv =
                     new FlinkEnv(
-                            remoteBasePath.toString(),
+                            pathContainer.getRemoteBasePath().toString(),
                             new StringifiedForStFileSystem(forStFileSystem));
             opt.setEnv(flinkEnv);
+            handlesToClose.add(flinkEnv);
         }
 
         return opt;
@@ -276,40 +296,16 @@ public final class ForStResourceContainer implements AutoCloseable {
         return opt;
     }
 
-    @Nullable
-    public Path getLocalBasePath() {
-        return localBasePath;
-    }
-
-    @Nullable
-    public Path getLocalForStPath() {
-        return localForStPath;
-    }
-
-    @Nullable
-    public Path getRemoteBasePath() {
-        return remoteBasePath;
-    }
-
-    @Nullable
-    public Path getRemoteForStPath() {
-        return remoteForStPath;
+    public ForStPathContainer getPathContainer() {
+        return pathContainer;
     }
 
     public Path getBasePath() {
-        if (remoteBasePath != null) {
-            return remoteBasePath;
-        } else {
-            return localBasePath;
-        }
+        return pathContainer.getBasePath();
     }
 
     public Path getDbPath() {
-        if (remoteForStPath != null) {
-            return remoteForStPath;
-        } else {
-            return localForStPath;
-        }
+        return pathContainer.getDbPath();
     }
 
     public boolean isCoordinatorInline() {
@@ -334,52 +330,63 @@ public final class ForStResourceContainer implements AutoCloseable {
      * @throws Exception if any unexpected behaviors.
      */
     public void prepareDirectories() throws Exception {
-        if (remoteBasePath != null && remoteForStPath != null) {
-            prepareDirectories(remoteBasePath, remoteForStPath);
+        if (pathContainer.getRemoteBasePath() != null
+                && pathContainer.getRemoteForStPath() != null) {
+            remotePathNewlyCreated =
+                    prepareDirectories(
+                            pathContainer.getRemoteBasePath(), pathContainer.getRemoteForStPath());
         }
-        if (localBasePath != null && localForStPath != null) {
-            prepareDirectories(
-                    new Path(localBasePath.getPath()), new Path(localForStPath.getPath()));
+        if (pathContainer.getLocalBasePath() != null && pathContainer.getLocalForStPath() != null) {
+            prepareDirectories(pathContainer.getLocalBasePath(), pathContainer.getLocalForStPath());
         }
-        if (remoteForStPath != null && localForStPath != null) {
-            if (cacheBasePath == null && localBasePath != null) {
-                cacheBasePath = new Path(localBasePath.getPath(), "cache");
+        if (pathContainer.getRemoteForStPath() != null
+                && pathContainer.getLocalForStPath() != null) {
+            if (cacheBasePath == null && pathContainer.getLocalBasePath() != null) {
+                cacheBasePath = new Path(pathContainer.getLocalBasePath().getPath(), "cache");
                 LOG.info(
                         "Cache base path is not configured, set to local base path: {}",
                         cacheBasePath);
             }
             forStFileSystem =
                     ForStFlinkFileSystem.get(
-                            remoteForStPath.toUri(),
-                            localForStPath,
+                            pathContainer.getRemoteForStPath().toUri(),
+                            pathContainer.getLocalForStPath(),
                             ForStFlinkFileSystem.getFileBasedCache(
-                                    cacheBasePath, cacheCapacity, cacheReservedSize));
+                                    configuration,
+                                    cacheBasePath,
+                                    pathContainer.getRemoteForStPath(),
+                                    cacheCapacity,
+                                    cacheReservedSize,
+                                    metricGroup));
         } else {
             forStFileSystem = null;
         }
     }
 
-    public ForStFlinkFileSystem getFileSystem() {
+    public @Nullable ForStFlinkFileSystem getFileSystem() {
         return forStFileSystem;
     }
 
-    private static void prepareDirectories(Path basePath, Path dbPath) throws IOException {
+    private static boolean prepareDirectories(Path basePath, Path dbPath) throws IOException {
+        boolean allNewlyCreated = true;
         FileSystem fileSystem = basePath.getFileSystem();
         if (fileSystem.exists(basePath)) {
             if (!fileSystem.getFileStatus(basePath).isDir()) {
                 throw new IOException("Not a directory: " + basePath);
             }
+            allNewlyCreated = false;
         } else if (!fileSystem.mkdirs(basePath)) {
             throw new IOException(
                     String.format("Could not create ForSt directory at %s.", basePath));
         }
         if (fileSystem.exists(dbPath)) {
-            fileSystem.delete(dbPath, true);
-        }
-        if (!fileSystem.mkdirs(dbPath)) {
+            LOG.info("Reusing previous ForSt db directory at {}.", dbPath);
+            allNewlyCreated = false;
+        } else if (!fileSystem.mkdirs(dbPath)) {
             throw new IOException(
                     String.format("Could not create ForSt db directory at %s.", dbPath));
         }
+        return allNewlyCreated;
     }
 
     /**
@@ -388,11 +395,19 @@ public final class ForStResourceContainer implements AutoCloseable {
      * @throws Exception if any unexpected behaviors.
      */
     public void clearDirectories() throws Exception {
+        Path remoteBasePath = pathContainer.getRemoteBasePath();
         if (remoteBasePath != null) {
-            clearDirectories(remoteBasePath);
+            forStFileSystem.delete(remoteBasePath, true);
         }
+        Path localBasePath = pathContainer.getLocalBasePath();
         if (localBasePath != null) {
             clearDirectories(localBasePath);
+        }
+    }
+
+    public void forceClearRemoteDirectories() throws Exception {
+        if (pathContainer.getRemoteBasePath() != null && remotePathNewlyCreated) {
+            clearDirectories(pathContainer.getRemoteBasePath());
         }
     }
 
@@ -419,14 +434,8 @@ public final class ForStResourceContainer implements AutoCloseable {
             sharedResources.close();
         }
         cleanRelocatedDbLogs();
-        if (flinkEnv != null) {
-            // There is something wrong with the FlinkEnv, the background threads won't quit during
-            // the disposal of DB. We explicit shrink the thread pool here until the ForSt repo
-            // fixes that.
-            flinkEnv.setBackgroundThreads(0, Priority.LOW);
-            flinkEnv.setBackgroundThreads(0, Priority.HIGH);
-            flinkEnv.close();
-            flinkEnv = null;
+        if (forStFileSystem != null) {
+            forStFileSystem.close();
         }
     }
 
@@ -484,19 +493,12 @@ public final class ForStResourceContainer implements AutoCloseable {
 
         String logDir = internalGetOption(ForStConfigurableOptions.LOG_DIR);
         if (logDir == null || logDir.isEmpty()) {
-            if (localForStPath == null
-                    || localForStPath.getPath().length() <= INSTANCE_PATH_LENGTH_LIMIT) {
+            // only relocate db log dir in local mode
+            if (pathContainer.getRemoteForStPath() == null
+                    && pathContainer.getLocalForStPath() != null
+                    && pathContainer.getLocalForStPath().getPath().length()
+                            <= INSTANCE_PATH_LENGTH_LIMIT) {
                 relocateDefaultDbLogDir(currentOptions);
-            } else if (remoteForStPath != null) { // log must put in local
-                Path relocatedPath = localForStPath.getParent().getParent();
-                LOG.warn("ForSt remote path is not null, relocate log in  {}.", relocatedPath);
-                currentOptions.setDbLogDir(relocatedPath.toString());
-            } else {
-                // disable log relocate when instance path length exceeds limit to prevent ForSt
-                // log file creation failure, details in FLINK-31743
-                LOG.warn(
-                        "ForSt local path length exceeds limit : {}, disable log relocate.",
-                        localForStPath);
             }
         } else {
             currentOptions.setDbLogDir(logDir);
@@ -537,6 +539,10 @@ public final class ForStResourceContainer implements AutoCloseable {
 
         currentOptions.setMinWriteBufferNumberToMerge(
                 internalGetOption(ForStConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
+
+        currentOptions.setPeriodicCompactionSeconds(
+                internalGetOption(ForStConfigurableOptions.COMPACT_FILTER_PERIODIC_COMPACTION_TIME)
+                        .getSeconds());
 
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
 
@@ -607,9 +613,10 @@ public final class ForStResourceContainer implements AutoCloseable {
         // log dir, which results in "/" being used as the log directory. This often has permission
         // issues, so the db log dir is temporarily set explicitly here.
         // TODO: remove this method after ForSt deal log dir well
-        if (localForStPath != null) {
-            this.relocatedDbLogBaseDir = java.nio.file.Path.of(localForStPath.toUri().toString());
-            dbOptions.setDbLogDir(localForStPath.getPath());
+        if (pathContainer.getLocalForStPath() != null) {
+            this.relocatedDbLogBaseDir =
+                    java.nio.file.Path.of(pathContainer.getLocalForStPath().toUri().toString());
+            dbOptions.setDbLogDir(pathContainer.getLocalForStPath().getPath());
         }
     }
 
@@ -626,10 +633,11 @@ public final class ForStResourceContainer implements AutoCloseable {
 
     /** Clean all relocated ForSt logs. */
     private void cleanRelocatedDbLogs() {
-        if (localForStPath != null && relocatedDbLogBaseDir != null) {
+        if (pathContainer.getLocalForStPath() != null && relocatedDbLogBaseDir != null) {
             LOG.info("Cleaning up relocated ForSt logs: {}.", relocatedDbLogBaseDir);
 
-            String relocatedDbLogPrefix = resolveRelocatedDbLogPrefix(localForStPath.getPath());
+            String relocatedDbLogPrefix =
+                    resolveRelocatedDbLogPrefix(pathContainer.getLocalForStPath().getPath());
             try {
                 Arrays.stream(FileUtils.listDirectory(relocatedDbLogBaseDir))
                         .filter(

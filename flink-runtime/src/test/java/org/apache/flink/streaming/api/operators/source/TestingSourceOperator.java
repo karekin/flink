@@ -27,7 +27,6 @@ import org.apache.flink.api.connector.source.mocks.MockSourceSplitSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.operators.coordination.MockOperatorEventGateway;
 import org.apache.flink.runtime.operators.coordination.OperatorEventGateway;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
@@ -65,7 +64,8 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
             SourceReader<T, MockSourceSplit> reader,
             WatermarkStrategy<T> watermarkStrategy,
             ProcessingTimeService timeService,
-            boolean emitProgressiveWatermarks) {
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery) {
 
         this(
                 parameters,
@@ -75,7 +75,8 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
                 new MockOperatorEventGateway(),
                 1,
                 5,
-                emitProgressiveWatermarks);
+                emitProgressiveWatermarks,
+                supportsSplitReassignmentOnRecovery);
     }
 
     public TestingSourceOperator(
@@ -86,7 +87,8 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
             OperatorEventGateway eventGateway,
             int subtaskIndex,
             int parallelism,
-            boolean emitProgressiveWatermarks) {
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery) {
 
         super(
                 parameters,
@@ -98,11 +100,12 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
                 new Configuration(),
                 "localhost",
                 emitProgressiveWatermarks,
-                () -> false);
+                () -> false,
+                Collections.emptyMap(),
+                supportsSplitReassignmentOnRecovery);
 
         this.subtaskIndex = subtaskIndex;
         this.parallelism = parallelism;
-        this.metrics = UnregisteredMetricGroups.createUnregisteredOperatorMetricGroup();
         initSourceMetricGroup();
 
         // unchecked wrapping is okay to keep tests simpler
@@ -115,7 +118,7 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
 
     @Override
     public StreamingRuntimeContext getRuntimeContext() {
-        return new MockStreamingRuntimeContext(false, parallelism, subtaskIndex);
+        return new MockStreamingRuntimeContext(parallelism, subtaskIndex);
     }
 
     // this is overridden to avoid complex mock injection through the "containingTask"
@@ -130,6 +133,15 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
             SourceReader<T, MockSourceSplit> reader,
             WatermarkStrategy<T> watermarkStrategy,
             boolean emitProgressiveWatermarks)
+            throws Exception {
+        return createTestOperator(reader, watermarkStrategy, emitProgressiveWatermarks, false);
+    }
+
+    public static <T> SourceOperator<T, MockSourceSplit> createTestOperator(
+            SourceReader<T, MockSourceSplit> reader,
+            WatermarkStrategy<T> watermarkStrategy,
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery)
             throws Exception {
 
         AbstractStateBackend abstractStateBackend = new HashMapStateBackend();
@@ -169,7 +181,8 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
                         reader,
                         watermarkStrategy,
                         timeService,
-                        emitProgressiveWatermarks);
+                        emitProgressiveWatermarks,
+                        supportsSplitReassignmentOnRecovery);
         sourceOperator.initializeState(stateContext);
         sourceOperator.open();
 

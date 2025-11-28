@@ -19,12 +19,12 @@
 package org.apache.flink.table.catalog;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.resource.ResourceUri;
 import org.apache.flink.util.StringUtils;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -37,6 +37,7 @@ public class CatalogFunctionImpl implements CatalogFunction {
     private final String className; // Fully qualified class name of the function
     private final FunctionLanguage functionLanguage;
     private final List<ResourceUri> resourceUris;
+    private final Map<String, String> options;
 
     public CatalogFunctionImpl(String className) {
         this(className, FunctionLanguage.JAVA, Collections.emptyList());
@@ -48,12 +49,21 @@ public class CatalogFunctionImpl implements CatalogFunction {
 
     public CatalogFunctionImpl(
             String className, FunctionLanguage functionLanguage, List<ResourceUri> resourceUris) {
+        this(className, functionLanguage, resourceUris, Collections.emptyMap());
+    }
+
+    public CatalogFunctionImpl(
+            String className,
+            FunctionLanguage functionLanguage,
+            List<ResourceUri> resourceUris,
+            Map<String, String> options) {
         checkArgument(
                 !StringUtils.isNullOrWhitespaceOnly(className),
                 "className cannot be null or empty");
         this.className = className;
         this.functionLanguage = checkNotNull(functionLanguage, "functionLanguage cannot be null");
         this.resourceUris = resourceUris;
+        this.options = checkNotNull(options, "options cannot be null");
     }
 
     @Override
@@ -64,7 +74,10 @@ public class CatalogFunctionImpl implements CatalogFunction {
     @Override
     public CatalogFunction copy() {
         return new CatalogFunctionImpl(
-                getClassName(), functionLanguage, Collections.unmodifiableList(resourceUris));
+                getClassName(),
+                functionLanguage,
+                Collections.unmodifiableList(resourceUris),
+                Collections.unmodifiableMap(options));
     }
 
     @Override
@@ -78,23 +91,6 @@ public class CatalogFunctionImpl implements CatalogFunction {
     }
 
     @Override
-    public boolean isGeneric() {
-        if (functionLanguage == FunctionLanguage.PYTHON) {
-            return true;
-        }
-        try {
-            ClassLoader cl = Thread.currentThread().getContextClassLoader();
-            Class c = Class.forName(className, true, cl);
-            if (UserDefinedFunction.class.isAssignableFrom(c)) {
-                return true;
-            }
-        } catch (ClassNotFoundException e) {
-            throw new RuntimeException(String.format("Can't resolve udf class %s", className), e);
-        }
-        return false;
-    }
-
-    @Override
     public FunctionLanguage getFunctionLanguage() {
         return functionLanguage;
     }
@@ -105,22 +101,30 @@ public class CatalogFunctionImpl implements CatalogFunction {
     }
 
     @Override
+    public Map<String, String> getOptions() {
+        return options;
+    }
+
+    @Override
     public boolean equals(Object o) {
-        if (this == o) {
-            return true;
-        }
         if (o == null || getClass() != o.getClass()) {
             return false;
         }
+
         CatalogFunctionImpl that = (CatalogFunctionImpl) o;
         return Objects.equals(className, that.className)
                 && functionLanguage == that.functionLanguage
-                && Objects.equals(resourceUris, that.resourceUris);
+                && Objects.equals(resourceUris, that.resourceUris)
+                && Objects.equals(options, that.options);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(className, functionLanguage, resourceUris);
+        int result = Objects.hashCode(className);
+        result = 31 * result + Objects.hashCode(functionLanguage);
+        result = 31 * result + Objects.hashCode(resourceUris);
+        result = 31 * result + Objects.hashCode(options);
+        return result;
     }
 
     @Override
@@ -134,6 +138,9 @@ public class CatalogFunctionImpl implements CatalogFunction {
                 + "', "
                 + "functionResource='"
                 + getFunctionResources()
+                + "', "
+                + "options='"
+                + getOptions()
                 + "'}";
     }
 }

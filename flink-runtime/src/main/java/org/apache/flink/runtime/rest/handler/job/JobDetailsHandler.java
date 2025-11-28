@@ -29,6 +29,7 @@ import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
 import org.apache.flink.runtime.rest.handler.legacy.ExecutionGraphCache;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcher;
+import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricStore;
 import org.apache.flink.runtime.rest.handler.util.MutableIOMetrics;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
@@ -85,7 +86,8 @@ public class JobDetailsHandler
     protected JobDetailsInfo handleRequest(
             HandlerRequest<EmptyRequestBody> request, AccessExecutionGraph executionGraph)
             throws RestHandlerException {
-        return createJobDetailsInfo(executionGraph, metricFetcher);
+        metricFetcher.update();
+        return createJobDetailsInfo(executionGraph, metricFetcher.getMetricStore().getJobs());
     }
 
     @Override
@@ -100,7 +102,8 @@ public class JobDetailsHandler
     }
 
     private static JobDetailsInfo createJobDetailsInfo(
-            AccessExecutionGraph executionGraph, @Nullable MetricFetcher metricFetcher) {
+            AccessExecutionGraph executionGraph,
+            @Nullable MetricStore.JobMetricStoreSnapshot jobMetrics) {
         final long now = System.currentTimeMillis();
         final long startTime = executionGraph.getStatusTimestamp(JobStatus.INITIALIZING);
         final long endTime =
@@ -124,10 +127,7 @@ public class JobDetailsHandler
                 executionGraph.getVerticesTopologically()) {
             final JobDetailsInfo.JobVertexDetailsInfo vertexDetailsInfo =
                     createJobVertexDetailsInfo(
-                            accessExecutionJobVertex,
-                            now,
-                            executionGraph.getJobID(),
-                            metricFetcher);
+                            accessExecutionJobVertex, now, executionGraph.getJobID(), jobMetrics);
 
             jobVertexInfos.add(vertexDetailsInfo);
             jobVerticesPerState[vertexDetailsInfo.getExecutionState().ordinal()]++;
@@ -139,6 +139,11 @@ public class JobDetailsHandler
         for (ExecutionState executionState : ExecutionState.values()) {
             jobVerticesPerStateMap.put(
                     executionState, jobVerticesPerState[executionState.ordinal()]);
+        }
+
+        JobPlanInfo.RawJson streamGraphJson = null;
+        if (executionGraph.getStreamGraphJson() != null) {
+            streamGraphJson = new JobPlanInfo.RawJson(executionGraph.getStreamGraphJson());
         }
 
         return new JobDetailsInfo(
@@ -155,11 +160,16 @@ public class JobDetailsHandler
                 timestamps,
                 jobVertexInfos,
                 jobVerticesPerStateMap,
-                new JobPlanInfo.RawJson(executionGraph.getJsonPlan()));
+                executionGraph.getPlan(),
+                streamGraphJson,
+                executionGraph.getPendingOperatorCount());
     }
 
     private static JobDetailsInfo.JobVertexDetailsInfo createJobVertexDetailsInfo(
-            AccessExecutionJobVertex ejv, long now, JobID jobId, MetricFetcher metricFetcher) {
+            AccessExecutionJobVertex ejv,
+            long now,
+            JobID jobId,
+            MetricStore.JobMetricStoreSnapshot jobMetrics) {
         int[] tasksPerState = new int[ExecutionState.values().length];
         long startTime = Long.MAX_VALUE;
         long endTime = 0;
@@ -210,7 +220,7 @@ public class JobDetailsHandler
             // rather than the aggregation of all attempts.
             counts.addIOMetrics(
                     vertex.getCurrentExecutionAttempt(),
-                    metricFetcher,
+                    jobMetrics,
                     jobId.toString(),
                     ejv.getJobVertexId().toString());
         }

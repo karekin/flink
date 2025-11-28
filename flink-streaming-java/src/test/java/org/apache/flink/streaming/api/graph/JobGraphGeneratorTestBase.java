@@ -24,6 +24,7 @@ import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.SupportsConcurrentExecutionAttempts;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.io.InputFormat;
@@ -47,6 +48,7 @@ import org.apache.flink.api.connector.source.lib.NumberSequenceSource;
 import org.apache.flink.api.connector.source.mocks.MockSource;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.PipelineOptions;
@@ -119,9 +121,10 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask;
 import org.apache.flink.streaming.util.TestAnyModeReadingStreamOperator;
 import org.apache.flink.util.AbstractID;
+import org.apache.flink.util.Collector;
 import org.apache.flink.util.SerializedValue;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.assertj.core.api.Assertions;
 import org.assertj.core.data.Offset;
@@ -150,11 +153,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static org.apache.flink.configuration.CheckpointingOptions.isUnalignedCheckpointEnabled;
 import static org.apache.flink.runtime.jobgraph.DistributionPattern.POINTWISE;
 import static org.apache.flink.streaming.api.graph.StreamingJobGraphGenerator.areOperatorsChainable;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.fail;
 
 /**
  * Tests for {@link StreamingJobGraphGenerator} and {@link AdaptiveGraphManager}.
@@ -245,27 +250,26 @@ abstract class JobGraphGeneratorTestBase {
         assertThat(snapshottingSettings.getCheckpointCoordinatorConfiguration().isExactlyOnce())
                 .isFalse();
 
-        List<JobVertex> verticesSorted = jobGraph.getVerticesSortedTopologicallyFromSources();
-        StreamConfig streamConfig = new StreamConfig(verticesSorted.get(0).getConfiguration());
-        assertThat(streamConfig.getCheckpointMode()).isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
+        assertThat(CheckpointingOptions.getCheckpointingMode(jobGraph.getJobConfiguration()))
+                .isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
     }
 
     @Test
     void testEnabledUnalignedCheckAndDisabledCheckpointing() {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.getCheckpointConfig().enableUnalignedCheckpoints(true);
         env.fromData(0).print();
         StreamGraph streamGraph = env.getStreamGraph();
         assertThat(streamGraph.getCheckpointConfig().isCheckpointingEnabled())
                 .withFailMessage("Checkpointing enabled")
                 .isFalse();
-        env.getCheckpointConfig().enableUnalignedCheckpoints(true);
 
         JobGraph jobGraph = createJobGraph(streamGraph);
 
-        List<JobVertex> verticesSorted = jobGraph.getVerticesSortedTopologicallyFromSources();
-        StreamConfig streamConfig = new StreamConfig(verticesSorted.get(0).getConfiguration());
-        assertThat(streamConfig.getCheckpointMode()).isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
-        assertThat(streamConfig.isUnalignedCheckpointsEnabled()).isFalse();
+        assertThat(CheckpointingOptions.getCheckpointingMode(jobGraph.getJobConfiguration()))
+                .isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
+        assertThat(streamGraph.getCheckpointConfig().isUnalignedCheckpointsEnabled()).isFalse();
+        assertThat(isUnalignedCheckpointEnabled(jobGraph.getJobConfiguration())).isFalse();
     }
 
     @Test
@@ -414,17 +418,17 @@ abstract class JobGraphGeneratorTestBase {
     @Test
     void testUnalignedCheckAndAtLeastOnce() {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.fromData(0).print();
-        StreamGraph streamGraph = env.getStreamGraph();
         env.enableCheckpointing(1000, CheckpointingMode.AT_LEAST_ONCE);
         env.getCheckpointConfig().enableUnalignedCheckpoints(true);
+        env.fromData(0).print();
+        StreamGraph streamGraph = env.getStreamGraph();
 
         JobGraph jobGraph = createJobGraph(streamGraph);
 
-        List<JobVertex> verticesSorted = jobGraph.getVerticesSortedTopologicallyFromSources();
-        StreamConfig streamConfig = new StreamConfig(verticesSorted.get(0).getConfiguration());
-        assertThat(streamConfig.getCheckpointMode()).isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
-        assertThat(streamConfig.isUnalignedCheckpointsEnabled()).isFalse();
+        assertThat(CheckpointingOptions.getCheckpointingMode(jobGraph.getJobConfiguration()))
+                .isEqualTo(CheckpointingMode.AT_LEAST_ONCE);
+        assertThat(streamGraph.getCheckpointConfig().isUnalignedCheckpointsEnabled()).isFalse();
+        assertThat(isUnalignedCheckpointEnabled(jobGraph.getJobConfiguration())).isFalse();
     }
 
     @Test
@@ -2161,6 +2165,32 @@ abstract class JobGraphGeneratorTestBase {
     void testOutputFormatSupportConcurrentExecutionAttempts() {
         testWhetherOutputFormatSupportsConcurrentExecutionAttempts(
                 new TestingOutputFormatSupportConcurrentExecutionAttempts<>(), true);
+    }
+
+    @Test
+    void testEnableAsyncStateForSyncOperatorThrowException() throws Exception {
+        final StreamExecutionEnvironment env =
+                StreamExecutionEnvironment.getExecutionEnvironment(new Configuration());
+        try {
+            env.fromData(1, 2, 3, 4, 5)
+                    .keyBy(k -> k)
+                    .flatMap(
+                            new FlatMapFunction<Integer, Integer>() {
+                                @Override
+                                public void flatMap(Integer value, Collector<Integer> out)
+                                        throws Exception {
+                                    out.collect(value);
+                                }
+                            })
+                    .enableAsyncState()
+                    .print();
+            fail("Enabling async state for synchronous operators is forbidden.");
+        } catch (UnsupportedOperationException e) {
+            assertThat(e.getMessage())
+                    .isEqualTo(
+                            "The transformation does not support "
+                                    + "async state, or you are enabling the async state without a keyed context (not behind a keyBy()).");
+        }
     }
 
     private void testWhetherOutputFormatSupportsConcurrentExecutionAttempts(

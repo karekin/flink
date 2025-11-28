@@ -21,6 +21,7 @@ package org.apache.flink.state.api;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.connector.sink.lib.OutputFormatSink;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
@@ -37,7 +38,6 @@ import org.apache.flink.state.api.runtime.StateBootstrapTransformationWithID;
 import org.apache.flink.state.api.runtime.metadata.SavepointMetadataV2;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.legacy.OutputFormatSinkFunction;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 
@@ -108,7 +108,10 @@ public class SavepointWriter {
                                                 "Savepoint must contain at least one operator state."));
 
         return new SavepointMetadataV2(
-                maxParallelism, metadata.getMasterStates(), metadata.getOperatorStates());
+                metadata.getCheckpointId(),
+                maxParallelism,
+                metadata.getMasterStates(),
+                metadata.getOperatorStates());
     }
 
     /**
@@ -123,7 +126,25 @@ public class SavepointWriter {
     public static SavepointWriter newSavepoint(
             StreamExecutionEnvironment executionEnvironment, int maxParallelism) {
         return new SavepointWriter(
-                createSavepointMetadata(maxParallelism), null, executionEnvironment);
+                createSavepointMetadata(0L, maxParallelism), null, executionEnvironment);
+    }
+
+    /**
+     * Creates a new savepoint. The savepoint will be written using the state backend defined via
+     * the clusters configuration.
+     *
+     * @param maxParallelism The max parallelism of the savepoint.
+     * @param checkpointId checkpoint ID.
+     * @return A {@link SavepointWriter}.
+     * @see #newSavepoint(StreamExecutionEnvironment, StateBackend, int)
+     * @see #withConfiguration(ConfigOption, Object)
+     */
+    public static SavepointWriter newSavepoint(
+            StreamExecutionEnvironment executionEnvironment,
+            long checkpointId,
+            int maxParallelism) {
+        return new SavepointWriter(
+                createSavepointMetadata(checkpointId, maxParallelism), null, executionEnvironment);
     }
 
     /**
@@ -139,10 +160,31 @@ public class SavepointWriter {
             StateBackend stateBackend,
             int maxParallelism) {
         return new SavepointWriter(
-                createSavepointMetadata(maxParallelism), stateBackend, executionEnvironment);
+                createSavepointMetadata(0L, maxParallelism), stateBackend, executionEnvironment);
     }
 
-    private static SavepointMetadataV2 createSavepointMetadata(int maxParallelism) {
+    /**
+     * Creates a new savepoint.
+     *
+     * @param stateBackend The state backend of the savepoint used for keyed state.
+     * @param checkpointId checkpoint ID.
+     * @param maxParallelism The max parallelism of the savepoint.
+     * @return A {@link SavepointWriter}.
+     * @see #newSavepoint(StreamExecutionEnvironment, int)
+     */
+    public static SavepointWriter newSavepoint(
+            StreamExecutionEnvironment executionEnvironment,
+            StateBackend stateBackend,
+            long checkpointId,
+            int maxParallelism) {
+        return new SavepointWriter(
+                createSavepointMetadata(checkpointId, maxParallelism),
+                stateBackend,
+                executionEnvironment);
+    }
+
+    private static SavepointMetadataV2 createSavepointMetadata(
+            long checkpointId, int maxParallelism) {
         Preconditions.checkArgument(
                 maxParallelism > 0 && maxParallelism <= UPPER_BOUND_MAX_PARALLELISM,
                 "Maximum parallelism must be between 1 and "
@@ -151,7 +193,7 @@ public class SavepointWriter {
                         + maxParallelism);
 
         return new SavepointMetadataV2(
-                maxParallelism, Collections.emptyList(), Collections.emptyList());
+                checkpointId, maxParallelism, Collections.emptyList(), Collections.emptyList());
     }
 
     /**
@@ -272,14 +314,14 @@ public class SavepointWriter {
         Optional<DataStream<OperatorState>> newOperatorStates =
                 writeOperatorStates(newOperatorTransformations, configuration, savepointPath);
 
-        if (executionEnvironment == null && !newOperatorStates.isPresent()) {
+        if (executionEnvironment == null && newOperatorStates.isEmpty()) {
             throw new IllegalStateException(
                     "Savepoint must contain at least one operator if no execution environment was provided.");
         }
 
         List<OperatorState> existingOperators = metadata.getExistingOperators();
 
-        if (!newOperatorStates.isPresent() && existingOperators.isEmpty()) {
+        if (newOperatorStates.isEmpty() && existingOperators.isEmpty()) {
             throw new IllegalStateException(
                     "Savepoint must contain at least one operator to be created.");
         }
@@ -295,11 +337,12 @@ public class SavepointWriter {
                         "reduce(OperatorState)",
                         TypeInformation.of(CheckpointMetadata.class),
                         new GroupReduceOperator<>(
-                                new MergeOperatorStates(metadata.getMasterStates())))
+                                new MergeOperatorStates(
+                                        metadata.getCheckpointId(), metadata.getMasterStates())))
                 .forceNonParallel()
                 .map(new CheckpointMetadataCheckpointMetadataMapFunction(this.uidTransformationMap))
                 .setParallelism(1)
-                .addSink(new OutputFormatSinkFunction<>(new SavepointOutputFormat(savepointPath)))
+                .sinkTo(new OutputFormatSink<>(new SavepointOutputFormat(savepointPath)))
                 .setParallelism(1)
                 .name(path);
     }
@@ -319,7 +362,7 @@ public class SavepointWriter {
         existingOperatorStates
                 .flatMap(new StatePathExtractor())
                 .setParallelism(1)
-                .addSink(new OutputFormatSinkFunction<>(new FileCopyFunction(path)));
+                .sinkTo(new OutputFormatSink<>(new FileCopyFunction(path)));
 
         return newOperatorStates != null
                 ? newOperatorStates.union(existingOperatorStates)

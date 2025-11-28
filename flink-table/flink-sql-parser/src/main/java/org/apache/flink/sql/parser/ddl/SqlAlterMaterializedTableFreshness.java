@@ -18,6 +18,8 @@
 
 package org.apache.flink.sql.parser.ddl;
 
+import org.apache.flink.sql.parser.SqlUnparseUtils;
+
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlIntervalLiteral;
 import org.apache.calcite.sql.SqlNode;
@@ -28,7 +30,7 @@ import org.apache.calcite.util.ImmutableNullableList;
 import java.util.List;
 
 /**
- * SqlNode to describe ALTER MATERIALIZED TABLE [catalogName.] [dataBasesName.]tableName SET
+ * SqlNode to describe ALTER MATERIALIZED TABLE [catalogName.][dataBasesName.]tableName SET
  * FRESHNESS = INTERVAL '&lt;num&gt;' { SECOND | MINUTE | HOUR | DAY } clause.
  */
 public class SqlAlterMaterializedTableFreshness extends SqlAlterMaterializedTable {
@@ -43,7 +45,7 @@ public class SqlAlterMaterializedTableFreshness extends SqlAlterMaterializedTabl
 
     @Override
     public List<SqlNode> getOperandList() {
-        return ImmutableNullableList.of(getTableName(), freshness);
+        return ImmutableNullableList.of(name, freshness);
     }
 
     public SqlIntervalLiteral getFreshness() {
@@ -51,10 +53,9 @@ public class SqlAlterMaterializedTableFreshness extends SqlAlterMaterializedTabl
     }
 
     @Override
-    public void unparse(SqlWriter writer, int leftPrec, int rightPrec) {
-        super.unparse(writer, leftPrec, rightPrec);
-        writer.keyword("SET FRESHNESS");
-        writer.keyword("=");
-        freshness.unparse(writer, leftPrec, rightPrec);
+    public void unparseAlterOperation(SqlWriter writer, int leftPrec, int rightPrec) {
+        super.unparseAlterOperation(writer, leftPrec, rightPrec);
+        writer.keyword("SET");
+        SqlUnparseUtils.unparseFreshness(freshness, false, writer, leftPrec, rightPrec);
     }
 }

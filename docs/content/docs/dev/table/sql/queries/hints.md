@@ -279,6 +279,49 @@ SELECT /*+ NEST_LOOP(t1) */ * FROM t1 JOIN t2 ON t1.id = t2.id;
 SELECT /*+ NEST_LOOP(t1, t3) */ * FROM t1 JOIN t2 ON t1.id = t2.id JOIN t3 ON t1.id = t3.id;
 ```
 
+#### MULTI_JOIN
+
+{{< label Streaming >}}
+
+`MULTI_JOIN` suggests that Flink uses the `MultiJoin operator` to process multiple regular joins simultaneously. This type of join hint is recommended when you have multiple joins that share at least one common join key and experience large intermediate state or record amplification. The MultiJoin operator eliminates intermediate state by processing joins across various input streams simultaneously, which can significantly reduce state size and improve performance in some cases.
+
+For more details on the MultiJoin operator, including when to use it and configuration options, see [Multiple Regular Joins]({{< ref "docs/dev/table/tuning" >}}#multiple-regular-joins).
+
+{{< hint info >}}
+Note:
+- The MULTI_JOIN hint can specify table names or table aliases. If a table has an alias, the hint must use the alias name.
+- At least one key must be shared between the join conditions for the MultiJoin operator to be applied.
+- When specified, the MULTI_JOIN hint applies to the tables listed in the hint within the current query block.
+{{< /hint >}}
+
+##### Examples
+
+```sql
+CREATE TABLE t1 (id BIGINT, name STRING, age INT) WITH (...);
+CREATE TABLE t2 (id BIGINT, name STRING, age INT) WITH (...);
+CREATE TABLE t3 (id BIGINT, name STRING, age INT) WITH (...);
+
+-- Flink will use the MultiJoin operator for the three-way join.
+SELECT /*+ MULTI_JOIN(t1, t2, t3) */ * FROM t1 
+JOIN t2 ON t1.id = t2.id 
+JOIN t3 ON t1.id = t3.id;
+
+-- Using table names instead of aliases.
+SELECT /*+ MULTI_JOIN(Users, Orders, Payments) */ * FROM Users 
+INNER JOIN Orders ON Users.user_id = Orders.user_id 
+INNER JOIN Payments ON Users.user_id = Payments.user_id;
+
+-- Partial match: only t1 and t2 will use MultiJoin, t3 will use regular join.
+SELECT /*+ MULTI_JOIN(t1, t2) */ * FROM t1 
+JOIN t2 ON t1.id = t2.id 
+JOIN t3 ON t1.id = t3.id;
+
+-- Combining MULTI_JOIN with STATE_TTL hint.
+SELECT /*+ MULTI_JOIN(t1, t2, t3), STATE_TTL('t1'='1d', 't2'='2d', 't3'='12h') */ * FROM t1 
+JOIN t2 ON t1.id = t2.id 
+JOIN t3 ON t1.id = t3.id;
+```
+
 #### LOOKUP
 
 {{< label Streaming >}}
@@ -368,6 +411,14 @@ The LOOKUP hint allows users to suggest the Flink optimizer to:
 	<td>integer</td>
 	<td>N/A</td>
 	<td>max attempt number of the 'fixed_delay' strategy</td>
+</tr>
+<tr>
+	<td>shuffle</td>
+	<td>shuffle</td>
+	<td>N</td>
+	<td>boolean</td>
+	<td>false</td>
+	<td>whether to enable custom lookup shuffle, which allows the lookup source to decide input data distribution and to optimize lookup strategy accordingly</td>
 </tr>
 </tbody>
 </table>
@@ -463,6 +514,23 @@ If the lookup source only has one capability, then the 'async' mode option can b
 ```sql
 LOOKUP('table'='Customers', 'retry-predicate'='lookup_miss', 'retry-strategy'='fixed_delay', 'fixed-delay'='10s','max-attempts'='3')
 ```
+
+#### 4. Enable Custom Data Distribution
+
+By default, the data distribution of Lookup Join's input stream is arbitrary, so sources may not
+make effective use of caches to accelerate lookups. By enabling custom shuffle as follows, the
+sources would be able to decide the distribution of the input data on their own and use this prior
+knowledge to optimize their caches and lookup strategy.
+
+```sql
+LOOKUP('table'='Customers', 'shuffle'='true')
+```
+
+In order to make full use of this feature, the target lookup source should have supported custom 
+shuffle. For connector developers, this could be achieved by having the `LookupTableSource` subclass 
+implement `SupportsLookupCustomShuffle`. Even if the source has not provided such support yet, users
+can still enable this feature first, and then Flink will try best to apply a hash partitioning, 
+which should also bring performance improvement.
 
 #### Further Notes
 

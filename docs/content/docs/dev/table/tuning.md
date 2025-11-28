@@ -302,3 +302,141 @@ The execution of mini-batch join operator are as shown in the figure below.
 MiniBatch optimization is disabled by default for regular join. In order to enable this optimization, you should set options `table.exec.mini-batch.enabled`, `table.exec.mini-batch.allow-latency` and `table.exec.mini-batch.size`. Please see [configuration]({{< ref "docs/dev/table/config" >}}#execution-options) page for more details.
 
 {{< top >}}
+
+## Multiple Regular Joins
+
+{{< label Streaming >}}
+
+Streaming Flink jobs with multiple non-temporal regular joins often experience operational instability and performance degradation due to large state sizes. This is often because the intermediate state created by a chain of joins is much larger than the input state itself. In Flink 2.1, we introduce a new multi-join operator, an optimization designed to significantly reduce state size and improve performance for join pipelines that involve record amplification and large intermediate state. This new operator eliminates the need to store intermediate state for joins across multiple tables by processing joins across various input streams simultaneously. This "zero intermediate state" approach primarily targets state reduction, offering substantial benefits in resource consumption and operational stability in some cases. This technique exchanges a reduction in storage requirements for a corresponding increase in computational effort, as intermediate states are re-evaluated upon necessity. 
+
+In most joins, a significant portion of processing time is spent fetching records from the state. The efficiency of the MultiJoin operator largely depends on the size of this intermediate state and the selectivity of the common join key(s). In a common scenario where a pipeline experiences record amplification—meaning each join produces more data and records than the previous one, the MultiJoin operator is more efficient. This is because it keeps the state on which the operator interacts much smaller, leading to a more stable operator. If a chain of joins actually produces less state than the original records, the MultiJoin operator will still use less state overall. However, in this specific case, binary joins might perform better because the state that the final joins need to operate on is smaller. 
+
+### The MultiJoin Operator
+The main benefits of the MultiJoin operator are:
+
+1) Considerably smaller state size due to zero intermediate state.
+2) Improved performance for chained joins with record amplification.
+3) Improved stability: linear state growth with amount of records processed, instead of polynomial growth with binary joins. 
+
+Also, pipelines with MultiJoin instead of binary joins usually have faster initialization and recovery times due to smaller state and fewer nodes.
+
+### When to enable the MultiJoin?
+
+If your job has multiple joins that share at least one common join key, and you observe that the intermediate state in the intermediate joins is larger than the input sources, consider enabling the MultiJoin operator.
+
+Recommended use cases:
+- The common join key(s) have a high selectivity (the number of records per key is small)
+- Statement with several chained joins and considerable intermediate state
+- No considerable data skew on the common join key(s)
+- Joins are generating large state (state 50+ GB)
+
+If your common join key(s) exhibit low selectivity (i.e., a high number of rows sharing the same key value), the MultiJoin operator's required recomputation of the intermediate state can severely impact performance. In such scenarios, binary joins are recommended, as these will partition the data using all join keys.
+
+### How to enable the MultiJoin?
+
+To enable this optimization globally for all eligible joins, set the following configuration:
+
+```sql
+SET 'table.optimizer.multi-join.enabled' = 'true';
+```
+
+Alternatively, you can enable the MultiJoin operator for specific tables using the `MULTI_JOIN` hint:
+
+```sql
+SELECT /*+ MULTI_JOIN(t1, t2, t3) */ * FROM t1 
+JOIN t2 ON t1.id = t2.id 
+JOIN t3 ON t1.id = t3.id;
+```
+
+The hint approach allows you to selectively apply the MultiJoin optimization to specific query blocks without enabling it globally. For more details on the MULTI_JOIN hint, see [Join Hints]({{< ref "docs/dev/table/sql/queries/hints" >}}#multi_join). The configuration setting takes precedence over the hint.
+
+Important: This is currently in an experimental state - optimizations and breaking changes might be implemented. We currently support only streaming INNER/LEFT joins. Due to records partitioning, you need at least one key that is shared between the join conditions, see:
+
+- Supported: A JOIN B ON A.key = B.key JOIN C ON A.key = C.key (Partition by key)
+- Supported: A JOIN B ON A.key = B.key JOIN C ON B.key = C.key (Partition by key via transitivity)
+- Not supported: A JOIN B ON A.key1 = B.key1 JOIN C ON B.key2 = C.key2 (No single key allows partitioning A, B, and C together in a single operator. This will be split into multiple MultiJoin operators)
+
+### MultiJoin Operator Example - Benchmark
+
+Here's a 10-way benchmark between the default binary joins and the MultiJoin operator. You can observe the amount of intermediate state in the first section, the amount of records processed when the operators reach 100% busyness in the second section, and the checkpoints in the third.
+
+{{< img src="/fig/table-streaming/multijoin_operator.png" height="100%" >}}
+
+For this 10-way join above, involving record amplification, we've observed significant improvements. Here are some rough numbers:
+
+- Performance: 2x to over 100x+ increase in processed records when both at 100% busyness.
+- State Size: 3x to over 1000x+ smaller as intermediate state grows.
+
+The total state is always smaller with the MultiJoin operator. In this case, the performance is initially the same, but as the intermediate state grows, the performance of binary joins degrades and the multi join remains stable and outperforms.
+
+This general benchmark for the 10-way join was run with the following configuration: 1 record per tenant_id (high selectivity), 10 upsert kafka topics, 10 parallelism, 1 record per second per topic. We used rocksdb with unaligned checkpoints and with incremental checkpoints. Each job ran in one TaskManager containing 8GB process memory, 1GB off-heap memory and 20% network memory. The JobManager had 4GB process memory. The host machine contained a M1 processor chip, 32GB RAM and 1TB SSD. The sink uses a blackhole connector so we only benchmark the joins. The SQL used to generate the benchmark data had this structure:
+
+```sql
+INSERT INTO JoinResultsMJ
+SELECT *all fields*
+FROM TenantKafka t
+         LEFT JOIN SuppliersKafka s ON t.tenant_id = s.tenant_id AND ...
+         LEFT JOIN ProductsKafka p ON t.tenant_id = p.tenant_id AND ...
+         LEFT JOIN CategoriesKafka c ON t.tenant_id = c.tenant_id AND ...
+         LEFT JOIN OrdersKafka o ON t.tenant_id = o.tenant_id AND ...
+         LEFT JOIN CustomersKafka cust ON t.tenant_id = cust.tenant_id AND ...
+         LEFT JOIN WarehousesKafka w ON t.tenant_id = w.tenant_id AND ...
+         LEFT JOIN ShippingKafka sh ON t.tenant_id = sh.tenant_id AND ...
+         LEFT JOIN PaymentKafka pay ON t.tenant_id = pay.tenant_id AND ...
+         LEFT JOIN InventoryKafka i ON t.tenant_id = i.tenant_id AND ...;
+```
+
+## Delta Joins
+
+In streaming jobs, regular joins keep all historical data from both inputs to ensure accuracy. Over time, this causes the state to grow continuously, increasing resource usage and impacting stability. 
+
+To mitigate these challenges, Flink introduces the delta join operator. The key idea is to replace the large state maintained by regular joins with a bidirectional lookup-based join that directly reuses data from the source tables. Compared to traditional regular joins, delta joins substantially reduce state size, enhances job stability, and lowers overall resource consumption.
+
+This feature is enabled by default. A regular join will be automatically optimized into a delta join when all the following conditions are met:
+
+1. The sql pattern satisfies the optimization criteria. For details, please refer to [Supported Features and Limitations]({{< ref "docs/dev/table/tuning" >}}#supported-features-and-limitations)
+2. The external storage system of the source table provides index information for fast querying for delta joins. Currently, [Apache Fluss(Incubating)](https://fluss.apache.org/blog/fluss-open-source/) has provided index information at the table level for Flink, allowing such tables to be used as source tables for delta joins. Please refer to the [Fluss documentation](https://fluss.apache.org/docs/0.8/engine-flink/delta-joins/#flink-version-support) for more details.
+
+### Working Principle
+
+In Flink, regular joins store all incoming records from both input sides in the state to ensure that corresponding records can be matched correctly when data arrives from the opposite side.
+
+In contrast, delta joins leverage the indexing capabilities of external storage systems. Instead of performing state lookups, delta joins issue efficient index-based queries directly against the external storage to retrieve matching records. This approach eliminates redundant data storage between the Flink state and the external system.
+
+{{< img src="/fig/table-streaming/delta_join.png" width="70%" height="70%" >}}
+
+### Important Configurations
+
+Delta join optimization is enabled by default. You can disable this feature manually by setting the following configuration:
+
+```sql
+SET 'table.optimizer.delta-join.strategy' = 'NONE';
+```
+
+Please see [Configuration]({{< ref "docs/dev/table/config" >}}#optimizer-options) page for more details.
+
+To fine-tune the performance of delta joins, you can also configure the following parameters:
+
+- `table.exec.delta-join.cache-enabled`
+- `table.exec.delta-join.left.cache-size`
+- `table.exec.delta-join.right.cache-size`
+
+Please see [Configuration]({{< ref "docs/dev/table/config" >}}#execution-options) page for more details.
+
+### Supported Features and Limitations
+
+Delta joins are continuously evolving, and supports the following features currently.
+
+1. Support for **INSERT-only** tables as source tables.
+2. Support for **CDC** tables without **DELETE operations** as source tables.
+3. Support for **projection** and **filter** operations between the source and the delta join.
+4. Support for **caching** within the delta join operator.
+
+However, Delta Joins also have several **limitations**. Jobs containing any of the following conditions cannot be optimized into a delta join:
+
+1. The **index key** of the table must be included in the join’s **equivalence conditions**.
+2. Only **INNER JOIN** is currently supported.
+3. The **downstream operator** must be able to handle **duplicate changes**, such as a sink operating in **UPSERT mode** without `upsertMaterialize`.
+4. When consuming a **CDC stream**, the **join key** must be part of the **primary key**.
+5. When consuming a **CDC stream**, all **filters** must be applied on the **upsert key**.
+6. **Non-deterministic functions** are not allowed in filters or projections.

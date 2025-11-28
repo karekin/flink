@@ -110,6 +110,55 @@ class WatermarkOutputMultiplexerTest {
     }
 
     @Test
+    void whenAllImmediateOutputsBecomeIdleWatermarkAdvances() {
+        TestingWatermarkOutput underlyingWatermarkOutput = createTestingWatermarkOutput();
+        WatermarkOutputMultiplexer multiplexer =
+                new WatermarkOutputMultiplexer(underlyingWatermarkOutput);
+
+        WatermarkOutput watermarkOutput1 = createImmediateOutput(multiplexer);
+        WatermarkOutput watermarkOutput2 = createImmediateOutput(multiplexer);
+
+        watermarkOutput1.emitWatermark(new Watermark(5));
+        watermarkOutput2.emitWatermark(new Watermark(2));
+
+        assertThat(underlyingWatermarkOutput.lastWatermark()).isEqualTo(new Watermark(2));
+        assertThat(underlyingWatermarkOutput.isIdle()).isFalse();
+
+        // No race condition between watermarkOutput1 and watermarkOutput2.
+        // Even if watermarkOutput1 becomes idle first, the final result is 5.
+        watermarkOutput1.markIdle();
+        watermarkOutput2.markIdle();
+
+        assertThat(underlyingWatermarkOutput.lastWatermark()).isEqualTo(new Watermark(5));
+        assertThat(underlyingWatermarkOutput.isIdle()).isTrue();
+    }
+
+    @Test
+    void whenAllDeferredOutputsEmitAndIdleWatermarkAdvances() {
+        TestingWatermarkOutput underlyingWatermarkOutput = createTestingWatermarkOutput();
+        WatermarkOutputMultiplexer multiplexer =
+                new WatermarkOutputMultiplexer(underlyingWatermarkOutput);
+
+        WatermarkOutput watermarkOutput1 = createDeferredOutput(multiplexer);
+        WatermarkOutput watermarkOutput2 = createDeferredOutput(multiplexer);
+
+        // Both emitting a watermark and becoming idle happen in the same invocation
+        watermarkOutput1.emitWatermark(new Watermark(5));
+        watermarkOutput1.markIdle();
+        // Both emitting a watermark and becoming idle happen in the same invocation
+        watermarkOutput2.emitWatermark(new Watermark(2));
+        watermarkOutput2.markIdle();
+
+        assertThat(underlyingWatermarkOutput.lastWatermark()).isNull();
+        assertThat(underlyingWatermarkOutput.isIdle()).isFalse();
+
+        multiplexer.onPeriodicEmit();
+
+        assertThat(underlyingWatermarkOutput.lastWatermark()).isEqualTo(new Watermark(5));
+        assertThat(underlyingWatermarkOutput.isIdle()).isTrue();
+    }
+
+    @Test
     void combinedWatermarkDoesNotRegressWhenIdleOutputRegresses() {
         TestingWatermarkOutput underlyingWatermarkOutput = createTestingWatermarkOutput();
         WatermarkOutputMultiplexer multiplexer =
@@ -263,7 +312,7 @@ class WatermarkOutputMultiplexerTest {
                 new WatermarkOutputMultiplexer(underlyingWatermarkOutput);
 
         final String id = "test-id";
-        multiplexer.registerNewOutput(id, watermark -> {});
+        multiplexer.registerNewOutput(id);
         WatermarkOutput immediateOutput = multiplexer.getImmediateOutput(id);
         WatermarkOutput deferredOutput = multiplexer.getDeferredOutput(id);
 
@@ -287,7 +336,7 @@ class WatermarkOutputMultiplexerTest {
                 new WatermarkOutputMultiplexer(underlyingWatermarkOutput);
 
         final String id = "1234-test";
-        multiplexer.registerNewOutput(id, watermark -> {});
+        multiplexer.registerNewOutput(id);
         WatermarkOutput immediateOutput = multiplexer.getImmediateOutput(id);
         WatermarkOutput deferredOutput = multiplexer.getDeferredOutput(id);
 
@@ -305,8 +354,8 @@ class WatermarkOutputMultiplexerTest {
         final long lowTimestamp = 156765L;
         final long highTimestamp = lowTimestamp + 10;
 
-        multiplexer.registerNewOutput("lower", watermark -> {});
-        multiplexer.registerNewOutput("higher", watermark -> {});
+        multiplexer.registerNewOutput("lower");
+        multiplexer.registerNewOutput("higher");
         multiplexer.getImmediateOutput("lower").emitWatermark(new Watermark(lowTimestamp));
 
         multiplexer.unregisterOutput("lower");
@@ -324,8 +373,8 @@ class WatermarkOutputMultiplexerTest {
         final long lowTimestamp = -4343L;
         final long highTimestamp = lowTimestamp + 10;
 
-        multiplexer.registerNewOutput("lower", watermark -> {});
-        multiplexer.registerNewOutput("higher", watermark -> {});
+        multiplexer.registerNewOutput("lower");
+        multiplexer.registerNewOutput("higher");
         multiplexer.getImmediateOutput("lower").emitWatermark(new Watermark(lowTimestamp));
         multiplexer.getImmediateOutput("higher").emitWatermark(new Watermark(highTimestamp));
 
@@ -343,11 +392,11 @@ class WatermarkOutputMultiplexerTest {
         final long lowTimestamp = 1L;
         final long highTimestamp = 2L;
 
-        multiplexer.registerNewOutput("higher", watermark -> {});
+        multiplexer.registerNewOutput("higher");
         multiplexer.getImmediateOutput("higher").emitWatermark(new Watermark(highTimestamp));
         multiplexer.unregisterOutput("higher");
 
-        multiplexer.registerNewOutput("lower", watermark -> {});
+        multiplexer.registerNewOutput("lower");
         multiplexer.getImmediateOutput("lower").emitWatermark(new Watermark(lowTimestamp));
 
         assertThat(underlyingWatermarkOutput.lastWatermark().getTimestamp())
@@ -359,7 +408,7 @@ class WatermarkOutputMultiplexerTest {
         final TestingWatermarkOutput underlyingWatermarkOutput = createTestingWatermarkOutput();
         final WatermarkOutputMultiplexer multiplexer =
                 new WatermarkOutputMultiplexer(underlyingWatermarkOutput);
-        multiplexer.registerNewOutput("does-exist", watermark -> {});
+        multiplexer.registerNewOutput("does-exist");
 
         final boolean unregistered = multiplexer.unregisterOutput("does-exist");
 
@@ -385,7 +434,7 @@ class WatermarkOutputMultiplexerTest {
 
         Watermark emittedWatermark = new Watermark(1);
         final String id = UUID.randomUUID().toString();
-        multiplexer.registerNewOutput(id, watermark -> {});
+        multiplexer.registerNewOutput(id);
         WatermarkOutput immediateOutput = multiplexer.getImmediateOutput(id);
         immediateOutput.emitWatermark(emittedWatermark);
         multiplexer.unregisterOutput(id);
@@ -401,7 +450,7 @@ class WatermarkOutputMultiplexerTest {
      */
     private static WatermarkOutput createImmediateOutput(WatermarkOutputMultiplexer multiplexer) {
         final String id = UUID.randomUUID().toString();
-        multiplexer.registerNewOutput(id, watermark -> {});
+        multiplexer.registerNewOutput(id);
         return multiplexer.getImmediateOutput(id);
     }
 
@@ -411,7 +460,7 @@ class WatermarkOutputMultiplexerTest {
      */
     private static WatermarkOutput createDeferredOutput(WatermarkOutputMultiplexer multiplexer) {
         final String id = UUID.randomUUID().toString();
-        multiplexer.registerNewOutput(id, watermark -> {});
+        multiplexer.registerNewOutput(id);
         return multiplexer.getDeferredOutput(id);
     }
 

@@ -36,7 +36,7 @@ import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
 import org.apache.flink.state.forst.ForStOperationUtils;
 import org.apache.flink.state.forst.ForStResourceContainer;
-import org.apache.flink.state.forst.ForStStateDataTransfer;
+import org.apache.flink.state.forst.datatransfer.ForStStateDataTransfer;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ResourceGuard;
 
@@ -136,14 +136,24 @@ public class ForStIncrementalSnapshotStrategy<K> extends ForStNativeFullSnapshot
             case FORWARD_BACKWARD:
                 // incremental checkpoint, use origin PreviousSnapshot
                 break;
-            case FORWARD:
             case NO_SHARING:
-                // full checkpoint, use empty PreviousSnapshot
+                // savepoint, use empty PreviousSnapshot
                 snapshotResources.setPreviousSnapshot(EMPTY_PREVIOUS_SNAPSHOT);
                 break;
+            case FORWARD:
+                // Full checkpoint for IncrementalSnapshotStrategy is not supported, except for the
+                // first one.
+                if (snapshotResources.previousSnapshot.isEmpty()) {
+                    break;
+                } else {
+                    throw new IllegalArgumentException(
+                            "Triggering a full checkpoint for IncrementalSnapshotStrategy is not supported.");
+                }
             default:
                 throw new IllegalArgumentException(
-                        "Unsupported sharing files strategy: " + sharingFilesStrategy);
+                        String.format(
+                                "Unsupported sharing files strategy for %s : %s",
+                                this.getClass().getName(), sharingFilesStrategy));
         }
 
         return new ForStIncrementalSnapshotOperation(
@@ -186,30 +196,29 @@ public class ForStIncrementalSnapshotStrategy<K> extends ForStNativeFullSnapshot
             long checkpointId, @Nonnull List<StateMetaInfoSnapshot> stateMetaInfoSnapshots) {
 
         final long lastCompletedCheckpoint;
-        final Collection<HandleAndLocalPath> confirmedSstFiles;
+        final SortedMap<Long, Collection<HandleAndLocalPath>> currentUploadedSstFiles;
 
         // use the last completed checkpoint as the comparison base.
         synchronized (uploadedSstFiles) {
             lastCompletedCheckpoint = lastCompletedCheckpointId;
-            confirmedSstFiles = uploadedSstFiles.get(lastCompletedCheckpoint);
-            LOG.trace(
-                    "Use confirmed SST files for checkpoint {}: {}",
-                    checkpointId,
-                    confirmedSstFiles);
+            currentUploadedSstFiles =
+                    new TreeMap<>(uploadedSstFiles.tailMap(lastCompletedCheckpoint));
         }
+        PreviousSnapshot previousSnapshot =
+                new PreviousSnapshot(currentUploadedSstFiles, lastCompletedCheckpoint);
         LOG.trace(
                 "Taking incremental snapshot for checkpoint {}. Snapshot is based on last completed checkpoint {} "
                         + "assuming the following (shared) confirmed files as base: {}.",
                 checkpointId,
                 lastCompletedCheckpoint,
-                confirmedSstFiles);
+                previousSnapshot);
 
         // snapshot meta data to save
         for (Map.Entry<String, ForStOperationUtils.ForStKvStateInfo> stateMetaInfoEntry :
                 kvStateInformation.entrySet()) {
             stateMetaInfoSnapshots.add(stateMetaInfoEntry.getValue().metaInfo.snapshot());
         }
-        return new PreviousSnapshot(confirmedSstFiles);
+        return previousSnapshot;
     }
 
     /** Encapsulates the process to perform an incremental snapshot of a ForStKeyedStateBackend. */
@@ -331,11 +340,13 @@ public class ForStIncrementalSnapshotStrategy<K> extends ForStNativeFullSnapshot
 
             List<HandleAndLocalPath> sstFilesTransferResult =
                     stateTransfer.transferFilesToCheckpointFs(
+                            sharingFilesStrategy,
                             classifiedFiles.f1,
                             checkpointStreamFactory,
                             stateScope,
                             snapshotCloseableRegistry,
-                            tmpResourcesRegistry);
+                            tmpResourcesRegistry,
+                            false);
 
             sstHandles.addAll(sstFilesTransferResult);
             transferBytes +=
@@ -345,11 +356,13 @@ public class ForStIncrementalSnapshotStrategy<K> extends ForStNativeFullSnapshot
 
             List<HandleAndLocalPath> miscFilesTransferResult =
                     stateTransfer.transferFilesToCheckpointFs(
+                            sharingFilesStrategy,
                             classifiedFiles.f2,
                             checkpointStreamFactory,
                             stateScope,
                             snapshotCloseableRegistry,
-                            tmpResourcesRegistry);
+                            tmpResourcesRegistry,
+                            false);
             metaHandles.addAll(miscFilesTransferResult);
             transferBytes +=
                     miscFilesTransferResult.stream()
@@ -358,12 +371,14 @@ public class ForStIncrementalSnapshotStrategy<K> extends ForStNativeFullSnapshot
 
             HandleAndLocalPath manifestFileTransferResult =
                     stateTransfer.transferFileToCheckpointFs(
+                            sharingFilesStrategy,
                             classifiedFiles.f3,
                             snapshotResources.manifestFileSize,
                             checkpointStreamFactory,
                             stateScope,
                             snapshotCloseableRegistry,
-                            tmpResourcesRegistry);
+                            tmpResourcesRegistry,
+                            false);
             metaHandles.add(manifestFileTransferResult);
             transferBytes += manifestFileTransferResult.getStateSize();
 

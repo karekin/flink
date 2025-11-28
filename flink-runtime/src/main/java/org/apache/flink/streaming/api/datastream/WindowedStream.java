@@ -28,6 +28,7 @@ import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
+import org.apache.flink.runtime.asyncprocessing.operators.windowing.triggers.AsyncTrigger;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.aggregation.AggregationFunction;
 import org.apache.flink.streaming.api.functions.aggregation.ComparableAggregator;
@@ -77,10 +78,13 @@ public class WindowedStream<T, K, W extends Window> {
 
     private final WindowOperatorBuilder<T, K, W> builder;
 
+    private boolean isEnableAsyncState;
+
     @PublicEvolving
     public WindowedStream(KeyedStream<T, K> input, WindowAssigner<? super T, W> windowAssigner) {
 
         this.input = input;
+        this.isEnableAsyncState = input.isEnableAsyncState();
 
         this.builder =
                 new WindowOperatorBuilder<>(
@@ -96,6 +100,19 @@ public class WindowedStream<T, K, W extends Window> {
     @PublicEvolving
     public WindowedStream<T, K, W> trigger(Trigger<? super T, ? super W> trigger) {
         builder.trigger(trigger);
+        return this;
+    }
+
+    /**
+     * Sets the {@code AsyncTrigger} that should be used to trigger window emission.
+     *
+     * <p>Will automatically enable async state for {@code WindowedStream}.
+     */
+    @Experimental
+    public WindowedStream<T, K, W> trigger(AsyncTrigger<? super T, ? super W> trigger) {
+        enableAsyncState();
+
+        builder.asyncTrigger(trigger);
         return this;
     }
 
@@ -216,7 +233,10 @@ public class WindowedStream<T, K, W extends Window> {
         final String opName = builder.generateOperatorName();
         final String opDescription = builder.generateOperatorDescription(reduceFunction, function);
 
-        OneInputStreamOperator<T, R> operator = builder.reduce(reduceFunction, function);
+        OneInputStreamOperator<T, R> operator =
+                isEnableAsyncState
+                        ? builder.asyncReduce(reduceFunction, function)
+                        : builder.reduce(reduceFunction, function);
         return input.transform(opName, resultType, operator).setDescription(opDescription);
     }
 
@@ -263,7 +283,10 @@ public class WindowedStream<T, K, W extends Window> {
 
         final String opName = builder.generateOperatorName();
         final String opDescription = builder.generateOperatorDescription(reduceFunction, function);
-        OneInputStreamOperator<T, R> operator = builder.reduce(reduceFunction, function);
+        OneInputStreamOperator<T, R> operator =
+                isEnableAsyncState
+                        ? builder.asyncReduce(reduceFunction, function)
+                        : builder.reduce(reduceFunction, function);
 
         return input.transform(opName, resultType, operator).setDescription(opDescription);
     }
@@ -414,7 +437,9 @@ public class WindowedStream<T, K, W extends Window> {
                 builder.generateOperatorDescription(aggregateFunction, windowFunction);
 
         OneInputStreamOperator<T, R> operator =
-                builder.aggregate(aggregateFunction, windowFunction, accumulatorType);
+                isEnableAsyncState
+                        ? builder.asyncAggregate(aggregateFunction, windowFunction, accumulatorType)
+                        : builder.aggregate(aggregateFunction, windowFunction, accumulatorType);
 
         return input.transform(opName, resultType, operator).setDescription(opDescription);
     }
@@ -525,7 +550,9 @@ public class WindowedStream<T, K, W extends Window> {
                 builder.generateOperatorDescription(aggregateFunction, windowFunction);
 
         OneInputStreamOperator<T, R> operator =
-                builder.aggregate(aggregateFunction, windowFunction, accumulatorType);
+                isEnableAsyncState
+                        ? builder.asyncAggregate(aggregateFunction, windowFunction, accumulatorType)
+                        : builder.aggregate(aggregateFunction, windowFunction, accumulatorType);
 
         return input.transform(opName, resultType, operator).setDescription(opDescription);
     }
@@ -569,7 +596,8 @@ public class WindowedStream<T, K, W extends Window> {
 
         final String opName = builder.generateOperatorName();
         final String opDescription = builder.generateOperatorDescription(function, null);
-        OneInputStreamOperator<T, R> operator = builder.apply(function);
+        OneInputStreamOperator<T, R> operator =
+                isEnableAsyncState ? builder.asyncApply(function) : builder.apply(function);
 
         return input.transform(opName, resultType, operator).setDescription(opDescription);
     }
@@ -613,7 +641,8 @@ public class WindowedStream<T, K, W extends Window> {
         final String opName = builder.generateOperatorName();
         final String opDesc = builder.generateOperatorDescription(function, null);
 
-        OneInputStreamOperator<T, R> operator = builder.process(function);
+        OneInputStreamOperator<T, R> operator =
+                isEnableAsyncState ? builder.asyncProcess(function) : builder.process(function);
 
         return input.transform(opName, resultType, operator).setDescription(opDesc);
     }
@@ -861,6 +890,7 @@ public class WindowedStream<T, K, W extends Window> {
     @Experimental
     public WindowedStream<T, K, W> enableAsyncState() {
         input.enableAsyncState();
+        this.isEnableAsyncState = true;
         return this;
     }
 

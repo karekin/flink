@@ -20,6 +20,7 @@ package org.apache.flink.state.forst.restore;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
@@ -44,9 +45,10 @@ import org.apache.flink.state.forst.ForStDBWriteBatchWrapper;
 import org.apache.flink.state.forst.ForStIncrementalCheckpointUtils;
 import org.apache.flink.state.forst.ForStNativeMetricOptions;
 import org.apache.flink.state.forst.ForStOperationUtils;
+import org.apache.flink.state.forst.ForStPathContainer;
 import org.apache.flink.state.forst.ForStResourceContainer;
-import org.apache.flink.state.forst.ForStStateDataTransfer;
 import org.apache.flink.state.forst.StateHandleTransferSpec;
+import org.apache.flink.state.forst.datatransfer.ForStStateDataTransfer;
 import org.apache.flink.state.forst.sync.ForStIteratorWrapper;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
@@ -92,7 +94,6 @@ import static org.apache.flink.state.forst.ForStIncrementalCheckpointUtils.check
 import static org.apache.flink.state.forst.ForStIncrementalCheckpointUtils.clipDBWithKeyGroupRange;
 import static org.apache.flink.state.forst.ForStIncrementalCheckpointUtils.findTheBestStateHandleForInitial;
 import static org.apache.flink.state.forst.ForStOperationUtils.createColumnFamilyOptions;
-import static org.apache.flink.state.forst.ForStResourceContainer.DB_DIR_STRING;
 
 /** Encapsulates the process of restoring a ForSt instance from an incremental snapshot. */
 public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperation {
@@ -126,6 +127,10 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
 
     private boolean isKeySerializerCompatibilityChecked;
 
+    private final RecoveryClaimMode recoveryClaimMode;
+
+    private final Function<StateMetaInfoSnapshot, RegisteredStateMetaInfoBase> stateMetaInfoFactory;
+
     public ForStIncrementalRestoreOperation(
             String operatorIdentifier,
             KeyGroupRange keyGroupRange,
@@ -148,7 +153,9 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
             @Nonnull Collection<IncrementalRemoteKeyedStateHandle> restoreStateHandles,
             double overlapFractionThreshold,
             boolean useIngestDbRestoreMode,
-            boolean useDeleteFilesInRange) {
+            boolean useDeleteFilesInRange,
+            RecoveryClaimMode recoveryClaimMode,
+            Function<StateMetaInfoSnapshot, RegisteredStateMetaInfoBase> stateMetaInfoFactory) {
 
         this.forstHandle =
                 new ForStHandle(
@@ -159,7 +166,8 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                         nativeMetricOptions,
                         metricGroup,
                         ttlCompactFiltersManager,
-                        writeBufferManagerCapacity);
+                        writeBufferManagerCapacity,
+                        stateMetaInfoFactory);
         this.operatorIdentifier = operatorIdentifier;
         this.restoredSstFiles = new TreeMap<>();
         this.lastCompletedCheckpointId = -1L;
@@ -177,6 +185,8 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
         this.overlapFractionThreshold = overlapFractionThreshold;
         this.useIngestDbRestoreMode = useIngestDbRestoreMode;
         this.useDeleteFilesInRange = useDeleteFilesInRange;
+        this.recoveryClaimMode = recoveryClaimMode;
+        this.stateMetaInfoFactory = stateMetaInfoFactory;
     }
 
     /**
@@ -207,7 +217,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
             toTransferSpecs.add(
                     new StateHandleTransferSpec(
                             restoreStateHandles.get(bestStateHandleForInit),
-                            new Path(forstBasePath, DB_DIR_STRING)));
+                            new Path(forstBasePath, ForStPathContainer.DB_DIR_STRING)));
         }
         for (int i = 0; i < restoreStateHandles.size(); i++) {
             if (i != bestStateHandleForInit) {
@@ -243,7 +253,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                     .forEach(
                             dir -> {
                                 try {
-                                    FileSystem fs = dir.getFileSystem();
+                                    FileSystem fs = getFileSystem(dir);
                                     fs.delete(dir, true);
                                 } catch (IOException ignored) {
                                     logger.warn("Failed to delete transfer destination {}", dir);
@@ -253,14 +263,15 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
     }
 
     private void transferAllStateHandles(List<StateHandleTransferSpec> specs) throws Exception {
-        FileSystem forStFs = optionsContainer.getFileSystem();
-        if (forStFs == null) {
-            forStFs = FileSystem.getLocalFileSystem();
-        }
-
         try (ForStStateDataTransfer transfer =
-                new ForStStateDataTransfer(ForStStateDataTransfer.DEFAULT_THREAD_NUM, forStFs)) {
-            transfer.transferAllStateDataToDirectory(specs, cancelStreamRegistry);
+                new ForStStateDataTransfer(
+                        ForStStateDataTransfer.DEFAULT_THREAD_NUM,
+                        optionsContainer.getFileSystem())) {
+            transfer.transferAllStateDataToDirectory(
+                    optionsContainer.getPathContainer(),
+                    specs,
+                    cancelStreamRegistry,
+                    recoveryClaimMode);
         }
     }
 
@@ -407,7 +418,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
 
         for (StateMetaInfoSnapshot stateMetaInfoSnapshot : stateMetaInfoSnapshots) {
             RegisteredStateMetaInfoBase metaInfoBase =
-                    RegisteredStateMetaInfoBase.fromMetaInfoSnapshot(stateMetaInfoSnapshot);
+                    stateMetaInfoFactory.apply(stateMetaInfoSnapshot);
 
             ColumnFamilyDescriptor columnFamilyDescriptor =
                     ForStOperationUtils.createColumnFamilyDescriptor(
@@ -558,7 +569,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
 
     private void cleanUpPathQuietly(@Nonnull Path path) {
         try {
-            path.getFileSystem().delete(path, true);
+            getFileSystem(forstBasePath).delete(path, true);
         } catch (IOException ex) {
             logger.warn("Failed to clean up path " + path, ex);
         }
@@ -664,7 +675,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
             throws Exception {
 
         Path exportCfBasePath = new Path(forstBasePath, "export-cfs");
-        forstBasePath.getFileSystem().mkdirs(exportCfBasePath);
+        getFileSystem(forstBasePath).mkdirs(exportCfBasePath);
 
         final Map<RegisteredStateMetaInfoBase.Key, List<ExportImportFilesMetaData>>
                 exportedColumnFamilyMetaData = new HashMap<>(keyedStateHandles.size());
@@ -689,7 +700,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                 StateHandleTransferSpec baseSpec =
                         new StateHandleTransferSpec(
                                 restoreStateHandles.get(bestStateHandleForInit),
-                                new Path(forstBasePath, DB_DIR_STRING));
+                                new Path(forstBasePath, ForStPathContainer.DB_DIR_STRING));
                 transferAllStateHandles(Collections.singletonList(baseSpec));
                 mergeStateHandlesWithCopyFromTemporaryInstance(
                         baseSpec,
@@ -743,14 +754,14 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                 String uuid = UUID.randomUUID().toString();
 
                 String subPathStr =
-                        optionsContainer.getRemoteBasePath() != null
+                        optionsContainer.getPathContainer().getRemoteBasePath() != null
                                 ? exportBasePath.getName() + "/" + uuid
                                 : exportBasePath.toString() + "/" + uuid;
                 ExportImportFilesMetaData exportedColumnFamilyMetaData =
                         checkpoint.exportColumnFamily(columnFamilyHandles.get(i), subPathStr);
 
                 FileStatus[] exportedSstFiles =
-                        exportBasePath.getFileSystem().listStatus(new Path(exportBasePath, uuid));
+                        getFileSystem(exportBasePath).listStatus(new Path(exportBasePath, uuid));
 
                 if (exportedSstFiles != null) {
                     int sstFileCount = 0;
@@ -881,7 +892,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
 
                     List<RegisteredStateMetaInfoBase> registeredStateMetaInfoBases =
                             tmpRestoreDBInfo.stateMetaInfoSnapshots.stream()
-                                    .map(RegisteredStateMetaInfoBase::fromMetaInfoSnapshot)
+                                    .map(stateMetaInfoFactory)
                                     .collect(Collectors.toList());
 
                     // Export all the Column Families and store the result in
@@ -945,9 +956,13 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                 new ArrayList<>(stateMetaInfoSnapshots.size() + 1);
 
         String dbName =
-                optionsContainer.getRemoteBasePath() != null
+                optionsContainer.getPathContainer().getRemoteBasePath() != null
                         ? "/" + stateHandleSpec.getTransferDestination().getName()
                         : stateHandleSpec.getTransferDestination().toString();
+
+        // do not relocate log file for temp db
+        DBOptions dbOptions = new DBOptions(this.forstHandle.getDbOptions());
+        dbOptions.setDbLogDir("");
 
         RocksDB restoreDb =
                 ForStOperationUtils.openDB(
@@ -956,7 +971,7 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                         columnFamilyHandles,
                         createColumnFamilyOptions(
                                 this.forstHandle.getColumnFamilyOptionsFactory(), "default"),
-                        this.forstHandle.getDbOptions());
+                        dbOptions);
 
         return new RestoredDBInstance(
                 restoreDb,
@@ -965,6 +980,14 @@ public class ForStIncrementalRestoreOperation<K> implements ForStRestoreOperatio
                 stateMetaInfoSnapshots,
                 stateHandleSpec.getStateHandle(),
                 stateHandleSpec.getTransferDestination().toString());
+    }
+
+    private FileSystem getFileSystem(Path path) throws IOException {
+        if (optionsContainer.getFileSystem() != null) {
+            return optionsContainer.getFileSystem();
+        } else {
+            return path.getFileSystem();
+        }
     }
 
     /** Entity to hold the temporary RocksDB instance created for restore. */

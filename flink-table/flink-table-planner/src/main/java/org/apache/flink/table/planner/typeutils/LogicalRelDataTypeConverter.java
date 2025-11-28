@@ -34,6 +34,7 @@ import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DayTimeIntervalType;
 import org.apache.flink.table.types.logical.DayTimeIntervalType.DayTimeResolution;
 import org.apache.flink.table.types.logical.DecimalType;
+import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
@@ -454,6 +455,11 @@ public final class LogicalRelDataTypeConverter {
         }
 
         @Override
+        public RelDataType visit(DescriptorType descriptorType) {
+            return relDataTypeFactory.createSqlType(SqlTypeName.COLUMN_LIST);
+        }
+
+        @Override
         public RelDataType visit(LogicalType other) {
             throw new TableException(
                     String.format(
@@ -573,6 +579,8 @@ public final class LogicalRelDataTypeConverter {
                                                         toLogicalType(
                                                                 f.getType(), dataTypeFactory)))
                                 .collect(Collectors.toList()));
+            case COLUMN_LIST:
+                return new DescriptorType(false);
             case STRUCTURED:
             case OTHER:
                 if (relDataType instanceof StructuredRelDataType) {
@@ -585,7 +593,6 @@ public final class LogicalRelDataTypeConverter {
             case TIME_WITH_LOCAL_TIME_ZONE:
             case ANY:
             case CURSOR:
-            case COLUMN_LIST:
             case DYNAMIC_STAR:
             case GEOMETRY:
             case SARG:

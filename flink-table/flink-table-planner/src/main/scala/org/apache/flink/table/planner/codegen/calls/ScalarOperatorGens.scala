@@ -41,6 +41,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldTypes, getPrecision, getScale}
 import org.apache.flink.table.types.logical.utils.LogicalTypeMerging.findCommonType
 import org.apache.flink.table.utils.DateTimeUtils.MILLIS_PER_DAY
+import org.apache.flink.types.ColumnList
 import org.apache.flink.util.Preconditions.checkArgument
 
 import java.time.ZoneId
@@ -418,6 +419,26 @@ object ScalarOperatorGens {
     // row types
     else if (isRow(left.resultType) && canEqual) {
       wrapExpressionIfNonEq(nonEq, generateRowComparison(ctx, left, right, resultType), resultType)
+    }
+    // structured types
+    else if (isStructuredType(left.resultType)) {
+      if (canEqual) {
+        val supportsEquality = left.resultType.asInstanceOf[StructuredType].getComparison.isEquality
+        if (!supportsEquality) {
+          throw new ValidationException(
+            s"Equality is not supported on structured type ${left.resultType}.")
+        }
+        wrapExpressionIfNonEq(
+          nonEq,
+          generateRowComparison(ctx, left, right, resultType),
+          resultType)
+      } else if (isStructuredType(right.resultType)) {
+        throw new ValidationException(
+          s"Incompatible structured types: ${left.resultType} and ${right.resultType}.")
+      } else {
+        throw new ValidationException(
+          s"Incompatible types: ${left.resultType} and ${right.resultType}.")
+      }
     }
     // multiset types
     else if (isMultiset(left.resultType) && canEqual) {
@@ -1100,6 +1121,20 @@ object ScalarOperatorGens {
   // value construction and accessing generate utils
   // ----------------------------------------------------------------------------------------
 
+  def generateDescriptor(
+      ctx: CodeGeneratorContext,
+      operands: Seq[GeneratedExpression],
+      resultType: LogicalType): GeneratedExpression = {
+    val columnNames = operands
+      .map(_.literalValue)
+      .map(
+        _.getOrElse(throw new CodeGenException("String literals expected for DESCRIPTOR operands")))
+      .map(_.toString)
+    val columnList = ColumnList.of(columnNames.toList)
+    val columnListTerm = ctx.addReusableObject(columnList, "columnList", className[ColumnList])
+    GeneratedExpression(columnListTerm, NEVER_NULL, NO_CODE, resultType)
+  }
+
   def generateRow(
       ctx: CodeGeneratorContext,
       rowType: LogicalType,
@@ -1120,8 +1155,14 @@ object ScalarOperatorGens {
               element
             } else {
               val tpe = fieldTypes(idx)
-              val resultTerm = primitiveDefaultValue(tpe)
-              GeneratedExpression(resultTerm, ALWAYS_NULL, NO_CODE, tpe, Some(null))
+              val defaultValue = primitiveDefaultValue(tpe)
+              val resultTypeTerm = primitiveTypeTermForType(tpe)
+              GeneratedExpression(
+                s"(($resultTypeTerm) $defaultValue)",
+                ALWAYS_NULL,
+                NO_CODE,
+                tpe,
+                Some(null))
             }
         }
         val row = generateLiteralRow(ctx, rowType, mapped)
@@ -1388,7 +1429,7 @@ object ScalarOperatorGens {
          |    $resultTerm = $nullTerm ? $defaultValue : $arrayGet;
          |    break;
          |  default:
-         |    throw new RuntimeException("Array has more than one element.");
+         |    throw new org.apache.flink.table.api.TableRuntimeException("Array has more than one element.");
          |}
          |""".stripMargin
 
@@ -1469,28 +1510,23 @@ object ScalarOperatorGens {
     val mapType = resultType.asInstanceOf[MapType]
     val baseMap = newName(ctx, "map")
 
-    // prepare map key array
-    val keyElements = elements
+    val keyValues = elements
       .grouped(2)
       .map { case Seq(key, value) => (key, value) }
       .toSeq
-      .groupBy(_._1)
-      .map(_._2.last)
-      .keys
-      .toSeq
+
+    val deduplicatedKeyValues = groupByOrdered(keyValues)(_._1).map {
+      case (_, pairs) =>
+        pairs.last // Take the last occurrence
+    }
+    // prepare map key array
+    val keyElements = deduplicatedKeyValues.map(_._1)
     val keyType = mapType.getKeyType
     val keyExpr = generateArray(ctx, new ArrayType(keyType), keyElements)
     val isKeyFixLength = isPrimitive(keyType)
 
     // prepare map value array
-    val valueElements = elements
-      .grouped(2)
-      .map { case Seq(key, value) => (key, value) }
-      .toSeq
-      .groupBy(_._1)
-      .map(_._2.last)
-      .values
-      .toSeq
+    val valueElements = deduplicatedKeyValues.map(_._2)
     val valueType = mapType.getValueType
     val valueExpr = generateArray(ctx, new ArrayType(valueType), valueElements)
     val isValueFixLength = isPrimitive(valueType)

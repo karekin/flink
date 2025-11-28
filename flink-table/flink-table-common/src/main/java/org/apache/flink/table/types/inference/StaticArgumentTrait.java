@@ -32,12 +32,24 @@ import java.util.stream.Collectors;
  */
 @PublicEvolving
 public enum StaticArgumentTrait {
+    // Roots
     SCALAR(),
     TABLE(),
     MODEL(),
-    TABLE_AS_ROW(TABLE),
-    TABLE_AS_SET(TABLE),
-    OPTIONAL_PARTITION_BY(TABLE_AS_SET);
+
+    // For TABLE
+    ROW_SEMANTIC_TABLE(TABLE),
+    SET_SEMANTIC_TABLE(TABLE),
+    PASS_COLUMNS_THROUGH(TABLE),
+    SUPPORT_UPDATES(TABLE),
+    REQUIRE_ON_TIME(TABLE),
+
+    // For SET_SEMANTIC_TABLE
+    OPTIONAL_PARTITION_BY(SET_SEMANTIC_TABLE),
+
+    // For SUPPORT_UPDATES
+    REQUIRE_UPDATE_BEFORE(SUPPORT_UPDATES),
+    REQUIRE_FULL_DELETE(SUPPORT_UPDATES);
 
     private final Set<StaticArgumentTrait> requirements;
 

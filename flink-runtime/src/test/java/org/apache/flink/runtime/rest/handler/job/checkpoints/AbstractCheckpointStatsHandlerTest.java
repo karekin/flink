@@ -32,14 +32,14 @@ import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 import org.apache.flink.runtime.rest.messages.MessageHeaders;
 import org.apache.flink.runtime.rest.messages.checkpoints.CheckpointingStatistics;
 import org.apache.flink.runtime.rest.messages.checkpoints.CheckpointingStatisticsHeaders;
-import org.apache.flink.runtime.rest.messages.checkpoints.StatsSummaryDto;
+import org.apache.flink.runtime.rest.messages.util.stats.StatsSummaryDto;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.TestingRestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 import org.apache.flink.util.concurrent.Executors;
 
-import org.apache.flink.shaded.guava32.com.google.common.cache.Cache;
-import org.apache.flink.shaded.guava32.com.google.common.cache.CacheBuilder;
+import org.apache.flink.shaded.guava33.com.google.common.cache.Cache;
+import org.apache.flink.shaded.guava33.com.google.common.cache.CacheBuilder;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
 import org.junit.jupiter.api.Test;

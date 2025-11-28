@@ -30,8 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static org.apache.flink.table.utils.IntervalFreshnessUtils.convertFreshnessToDuration;
-
 /**
  * Represents the unresolved metadata of a materialized table in a {@link Catalog}.
  *
@@ -62,6 +60,14 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
     @Override
     default TableKind getTableKind() {
         return TableKind.MATERIALIZED_TABLE;
+    }
+
+    /**
+     * Returns the distribution of the materialized table if the {@code DISTRIBUTED} clause is
+     * defined.
+     */
+    default Optional<TableDistribution> getDistribution() {
+        return Optional.empty();
     }
 
     /**
@@ -101,6 +107,21 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
     Optional<Long> getSnapshot();
 
     /**
+     * Original text of the materialized table definition that preserves the original formatting.
+     *
+     * @return the original string literal provided by the user.
+     */
+    String getOriginalQuery();
+
+    /**
+     * Expanded text of the original materialized table definition with resolved identifiers. This
+     * is needed because context such as current DB is lost after the session.
+     *
+     * @return the materialized table definition in expanded text.
+     */
+    String getExpandedQuery();
+
+    /**
      * The definition query text of materialized table, text is expanded in contrast to the original
      * SQL. This is needed because the context such as current DB is lost after the session, in
      * which view is defined, is gone. Expanded query text takes care of this, as an example.
@@ -111,27 +132,39 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
      * database "default" and has two columns ("name" and "value").
      *
      * @return the materialized table definition in expanded text.
+     * @deprecated The definition query will be removed in future versions, please use {@link
+     *     #getExpandedQuery()} instead.
      */
-    String getDefinitionQuery();
+    @Deprecated
+    default String getDefinitionQuery() {
+        return getExpandedQuery();
+    }
 
     /**
      * Get the definition freshness of materialized table which is used to determine the physical
      * refresh mode.
      */
+    @Nullable
     IntervalFreshness getDefinitionFreshness();
 
     /**
      * Get the {@link Duration} value of materialized table definition freshness, it is converted
      * from {@link IntervalFreshness}.
+     *
+     * @deprecated use {@link #getDefinitionFreshness()} together with {@link
+     *     IntervalFreshness#toDuration()} instead.
      */
-    default Duration getFreshness() {
-        return convertFreshnessToDuration(getDefinitionFreshness());
+    @Deprecated
+    default @Nullable Duration getFreshness() {
+        final IntervalFreshness definitionFreshness = getDefinitionFreshness();
+        return definitionFreshness == null ? null : definitionFreshness.toDuration();
     }
 
     /** Get the logical refresh mode of materialized table. */
     LogicalRefreshMode getLogicalRefreshMode();
 
     /** Get the physical refresh mode of materialized table. */
+    @Nullable
     RefreshMode getRefreshMode();
 
     /** Get the refresh status of materialized table. */
@@ -192,13 +225,15 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
 
         private Schema schema;
         private String comment;
+        private TableDistribution distribution = null;
         private List<String> partitionKeys = Collections.emptyList();
         private Map<String, String> options = Collections.emptyMap();
         private @Nullable Long snapshot;
-        private String definitionQuery;
-        private IntervalFreshness freshness;
+        private String originalQuery;
+        private String expandedQuery;
+        private @Nullable IntervalFreshness freshness;
         private LogicalRefreshMode logicalRefreshMode;
-        private RefreshMode refreshMode;
+        private @Nullable RefreshMode refreshMode;
         private RefreshStatus refreshStatus;
         private @Nullable String refreshHandlerDescription;
         private @Nullable byte[] serializedRefreshHandler;
@@ -231,15 +266,28 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
             return this;
         }
 
-        public Builder definitionQuery(String definitionQuery) {
-            this.definitionQuery =
-                    Preconditions.checkNotNull(
-                            definitionQuery, "Definition query must not be null.");
+        public Builder originalQuery(String originalQuery) {
+            this.originalQuery =
+                    Preconditions.checkNotNull(originalQuery, "Original query must not be null.");
             return this;
         }
 
-        public Builder freshness(IntervalFreshness freshness) {
-            this.freshness = Preconditions.checkNotNull(freshness, "Freshness must not be null.");
+        public Builder expandedQuery(String expandedQuery) {
+            this.expandedQuery =
+                    Preconditions.checkNotNull(expandedQuery, "Expanded query must not be null.");
+            return this;
+        }
+
+        /**
+         * @deprecated Use {@link #expandedQuery(String)} instead.
+         */
+        @Deprecated
+        public Builder definitionQuery(String definitionQuery) {
+            return expandedQuery(definitionQuery);
+        }
+
+        public Builder freshness(@Nullable IntervalFreshness freshness) {
+            this.freshness = freshness;
             return this;
         }
 
@@ -250,9 +298,8 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
             return this;
         }
 
-        public Builder refreshMode(RefreshMode refreshMode) {
-            this.refreshMode =
-                    Preconditions.checkNotNull(refreshMode, "Refresh mode must not be null.");
+        public Builder refreshMode(@Nullable RefreshMode refreshMode) {
+            this.refreshMode = refreshMode;
             return this;
         }
 
@@ -272,14 +319,21 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
             return this;
         }
 
+        public Builder distribution(@Nullable TableDistribution distribution) {
+            this.distribution = distribution;
+            return this;
+        }
+
         public CatalogMaterializedTable build() {
             return new DefaultCatalogMaterializedTable(
                     schema,
                     comment,
+                    distribution,
                     partitionKeys,
                     options,
                     snapshot,
-                    definitionQuery,
+                    originalQuery,
+                    expandedQuery,
                     freshness,
                     logicalRefreshMode,
                     refreshMode,

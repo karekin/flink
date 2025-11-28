@@ -28,17 +28,18 @@ import org.apache.flink.datastream.impl.common.OutputCollector;
 import org.apache.flink.datastream.impl.common.TimestampCollector;
 import org.apache.flink.datastream.impl.context.DefaultNonPartitionedContext;
 import org.apache.flink.datastream.impl.context.DefaultProcessingTimeManager;
+import org.apache.flink.datastream.impl.extension.eventtime.functions.EventTimeWrappedTwoInputBroadcastStreamProcessFunction;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.operators.InternalTimer;
 import org.apache.flink.streaming.api.operators.InternalTimerService;
 import org.apache.flink.streaming.api.operators.Triggerable;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import javax.annotation.Nullable;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /** Operator for {@link TwoInputBroadcastStreamProcessFunction} in {@link KeyedPartitionStream}. */
 public class KeyedTwoInputBroadcastProcessOperator<KEY, IN1, IN2, OUT>
@@ -90,7 +91,10 @@ public class KeyedTwoInputBroadcastProcessOperator<KEY, IN1, IN2, OUT>
 
     @Override
     public void onEventTime(InternalTimer<KEY, VoidNamespace> timer) throws Exception {
-        // do nothing at the moment.
+        if (userFunction instanceof EventTimeWrappedTwoInputBroadcastStreamProcessFunction) {
+            ((EventTimeWrappedTwoInputBroadcastStreamProcessFunction<IN1, IN2, OUT>) userFunction)
+                    .onEventTime(timer.getTimestamp(), getOutputCollector(), partitionedContext);
+        }
     }
 
     @Override
@@ -102,19 +106,32 @@ public class KeyedTwoInputBroadcastProcessOperator<KEY, IN1, IN2, OUT>
     @Override
     protected NonPartitionedContext<OUT> getNonPartitionedContext() {
         return new DefaultNonPartitionedContext<>(
-                context, partitionedContext, collector, true, keySet);
+                context,
+                partitionedContext,
+                collector,
+                true,
+                keySet,
+                output,
+                watermarkDeclarationMap);
     }
 
     @Override
-    @SuppressWarnings({"rawtypes"})
-    // Only element from input1 should be considered as the other side is broadcast input.
-    public void setKeyContextElement1(StreamRecord record) throws Exception {
-        super.setKeyContextElement1(record);
-        keySet.add(getCurrentKey());
+    public void newKeySelected(Object newKey) {
+        keySet.add(newKey);
     }
 
     @Override
-    public boolean isAsyncStateProcessingEnabled() {
+    public boolean isAsyncKeyOrderedProcessingEnabled() {
         return true;
+    }
+
+    @Override
+    protected InternalTimerService<VoidNamespace> getTimerService() {
+        return timerService;
+    }
+
+    @Override
+    protected Supplier<Long> getEventTimeSupplier() {
+        return () -> timerService.currentWatermark();
     }
 }

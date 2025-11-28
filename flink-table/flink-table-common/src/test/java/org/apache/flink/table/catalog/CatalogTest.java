@@ -1621,7 +1621,9 @@ public abstract class CatalogTest {
                         Column.physical("second", DataTypes.INT()),
                         Column.physical("third", DataTypes.STRING())),
                 Collections.emptyList(),
-                null);
+                null,
+                Collections.singletonList(
+                        DefaultIndex.newIndex("idx", Collections.singletonList("first"))));
     }
 
     protected ResolvedSchema createAnotherSchema() {
@@ -1631,7 +1633,9 @@ public abstract class CatalogTest {
                         Column.physical("second", DataTypes.STRING()),
                         Column.physical("third", DataTypes.STRING())),
                 Collections.emptyList(),
-                null);
+                null,
+                Collections.singletonList(
+                        DefaultIndex.newIndex("idx", Collections.singletonList("first"))));
     }
 
     protected List<String> createPartitionKeys() {
@@ -1739,7 +1743,6 @@ public abstract class CatalogTest {
 
     protected void checkEquals(CatalogFunction f1, CatalogFunction f2) {
         assertThat(f2.getClassName()).isEqualTo(f1.getClassName());
-        assertThat(f2.isGeneric()).isEqualTo(f1.isGeneric());
         assertThat(f2.getFunctionLanguage()).isEqualTo(f1.getFunctionLanguage());
     }
 

@@ -412,7 +412,7 @@ Table result = orders.as("x, y, z, t");
 ```
 {{< /tab >}}
 {{< tab "scala" >}}
-```java
+```scala
 val orders: Table = tableEnv.from("Orders").as("x", "y", "z", "t")
 ```
 {{< /tab >}}
@@ -1131,8 +1131,9 @@ tableEnv.createTemporarySystemFunction("rates", rates);
 Table orders = tableEnv.from("Orders");
 Table result = orders
     .joinLateral(call("rates", $("o_proctime")), $("o_currency").isEqual($("r_currency")));
+```
 {{< /tab >}}
-{{< tabs "Scala" >}}
+{{< tab "Scala" >}}
 ```scala
 val ratesHistory = tableEnv.from("RatesHistory")
 
@@ -1144,7 +1145,7 @@ val orders = tableEnv.from("Orders")
 val result = orders
     .joinLateral(rates($"o_rowtime"), $"r_currency" === $"o_currency")
 ```
-{{< /tabs >}}
+{{< /tab >}}
 {{< tab "Python" >}}
 Currently not supported in Python Table API.
 {{< /tab >}}
@@ -1362,7 +1363,7 @@ Similar to a SQL `IN` clause. In returns true if an expression exists in a given
 {{< tabs "in" >}}
 {{< tab "Java" >}}
 ```java
-Table left = tableEnv.from("Orders1")
+Table left = tableEnv.from("Orders1");
 Table right = tableEnv.from("Orders2");
 
 Table result = left.select($("a"), $("b"), $("c")).where($("a").in(right));
@@ -2733,6 +2734,115 @@ result = t.select(col('a'), col('c')) \
 {{< /tabs >}}
 
 {{< query_state_warning >}}
+
+### Model Inference
+
+{{< label Streaming >}}
+
+The Table API supports model inference operations that allow you to integrate machine learning models directly into your data processing pipelines. You can create models with specific providers and use them to make inference on your data.
+
+#### Creating and Using Models
+
+Models are created using `ModelDescriptor` which specifies the provider, input/output schemas, and configuration options. Once created, you can use the model to make predictions on tables.
+
+{{< tabs "model-inference" >}}
+{{< tab "Java" >}}
+
+```java
+// 1. Set up the local environment
+EnvironmentSettings settings = EnvironmentSettings.inStreamingMode();
+TableEnvironment tEnv = TableEnvironment.create(settings);
+
+// 2. Create a source table from in-memory data
+Table myTable = tEnv.fromValues(
+    ROW(FIELD("text", STRING())),
+    row("Hello"),
+    row("Machine Learning"),
+    row("Good morning")
+);
+
+// 3. Create model
+tEnv.createModel(
+    "my_model",
+    ModelDescriptor.forProvider("openai")
+        .inputSchema(Schema.newBuilder().column("input", STRING()).build())
+        .outputSchema(Schema.newBuilder().column("output", STRING()).build())
+        .option("endpoint", "https://api.openai.com/v1/chat/completions")
+        .option("model", "gpt-4.1")
+        .option("system-prompt", "translate text to Chinese")
+        .option("api-key", "<your-openai-api-key-here>")
+        .build()
+);
+
+Model model = tEnv.fromModel("my_model");
+
+// 4. Use the model to translate text to Chinese
+Table predictResult = model.predict(myTable, ColumnList.of("text"));
+
+// 5. Async prediction example
+Table asyncPredictResult = model.predict(
+    myTable, 
+    ColumnList.of("text"), 
+    Map.of("async", "true")
+);
+```
+
+{{< /tab >}}
+{{< tab "Scala" >}}
+
+```scala
+// 1. Set up the local environment
+val settings = EnvironmentSettings.inStreamingMode()
+val tEnv = TableEnvironment.create(settings)
+
+// 2. Create a source table from in-memory data
+val myTable: Table = tEnv.fromValues(
+    ROW(FIELD("text", STRING())),
+    row("Hello"),
+    row("Machine Learning"),
+    row("Good morning")
+)
+
+// 3. Create model
+tEnv.createModel(
+    "my_model",
+    ModelDescriptor.forProvider("openai")
+        .inputSchema(Schema.newBuilder().column("input", STRING()).build())
+        .outputSchema(Schema.newBuilder().column("output", STRING()).build())
+        .option("endpoint", "https://api.openai.com/v1/chat/completions")
+        .option("model", "gpt-4.1")
+        .option("system-prompt", "translate to chinese")
+        .option("api-key", "<your-openai-api-key-here>")
+        .build()
+)
+
+val model = tEnv.fromModel("my_model")
+
+// 4. Use the model to translate text to Chinese
+val predictResult = model.predict(myTable, ColumnList.of("text"))
+
+// 5. Async prediction example
+val asyncPredictResult = model.predict(
+    myTable, 
+    ColumnList.of("text"), 
+    Map("async" -> "true").asJava
+)
+```
+
+{{< /tab >}}
+{{< tab "Python" >}}
+
+```python
+# Not yet supported in Python Table API
+```
+
+{{< /tab >}}
+{{< /tabs >}}
+
+Model inference supports both synchronous and asynchronous prediction modes (when supported by the underlying `ModelProvider` interface). 
+By default, the planner uses asynchronous mode to maximize throughput for high-latency models by processing multiple requests concurrently.
+
+{{< top >}}
 
 Data Types
 ----------

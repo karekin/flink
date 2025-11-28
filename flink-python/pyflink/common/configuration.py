@@ -27,6 +27,18 @@ class Configuration:
     """
     Lightweight configuration object which stores key/value pairs.
     """
+    @classmethod
+    def from_dict(cls, map: dict[str, str]):
+        """
+        Create a new configuration from the dict.
+
+        :param map: The dict to construct Configuration object.
+        """
+        gateway = get_gateway()
+        java_map = gateway.jvm.java.util.HashMap(map)
+        j_configuration_cls = gateway.jvm.org.apache.flink.configuration.Configuration
+        return Configuration(
+            j_configuration=j_configuration_cls.fromMap(java_map))
 
     def __init__(self, other: 'Configuration' = None, j_configuration: JavaObject = None):
         """
@@ -69,18 +81,20 @@ class Configuration:
         jars_key = jvm.org.apache.flink.configuration.PipelineOptions.JARS.key()
         classpaths_key = jvm.org.apache.flink.configuration.PipelineOptions.CLASSPATHS.key()
         if key in [jars_key, classpaths_key]:
-            jar_urls = Configuration.parse_jars_value(value, jvm)
+            jar_urls = Configuration.parse_list_value(value)
             add_jars_to_context_class_loader(jar_urls)
         self._j_configuration.setString(key, value)
         return self
 
     @staticmethod
-    def parse_jars_value(value: str, jvm):
+    def parse_list_value(value: str):
+        if not value:
+            return []
         from ruamel.yaml import YAML
         yaml = YAML(typ='safe')
-        jar_urls_list = yaml.load(value)
-        if isinstance(jar_urls_list, list):
-            return jar_urls_list
+        value_list = yaml.load(value)
+        if isinstance(value_list, list):
+            return value_list
         return value.split(";")
 
     def get_integer(self, key: str, default_value: int) -> int:

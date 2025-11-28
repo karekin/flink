@@ -21,8 +21,12 @@ package org.apache.flink.table.expressions;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.api.ApiExpression;
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Model;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.api.internal.ModelImpl;
+import org.apache.flink.table.api.internal.TableImpl;
 import org.apache.flink.table.catalog.ContextResolvedFunction;
 import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
@@ -290,11 +294,18 @@ public final class ApiExpressionUtils {
     }
 
     public static TableReferenceExpression tableRef(String name, Table table) {
-        return tableRef(name, table.getQueryOperation());
+        return new TableReferenceExpression(
+                name, table.getQueryOperation(), ((TableImpl) table).getTableEnvironment());
     }
 
-    public static TableReferenceExpression tableRef(String name, QueryOperation queryOperation) {
-        return new TableReferenceExpression(name, queryOperation);
+    public static TableReferenceExpression tableRef(
+            String name, QueryOperation queryOperation, TableEnvironment env) {
+        return new TableReferenceExpression(name, queryOperation, env);
+    }
+
+    public static ModelReferenceExpression modelRef(String name, Model model) {
+        return new ModelReferenceExpression(
+                name, ((ModelImpl) model).getModel(), ((ModelImpl) model).getTableEnvironment());
     }
 
     public static LookupCallExpression lookupCall(String name, Expression... args) {

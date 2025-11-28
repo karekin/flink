@@ -29,6 +29,7 @@ import org.apache.flink.table.operations.CreateTableASOperation;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 import org.apache.flink.table.planner.parse.CalciteParser;
+import org.apache.flink.table.planner.utils.TestSimpleDynamicTableSourceFactory;
 
 import org.apache.calcite.sql.SqlNode;
 import org.assertj.core.api.HamcrestCondition;
@@ -36,7 +37,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 
 import static org.apache.flink.table.planner.utils.OperationMatchers.isCreateTableOperation;
@@ -48,9 +48,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test base for testing convert CREATE TABLE AS statement to operation. */
-public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTestBase {
+class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTestBase {
+
+    private static final Map<String, String> TABLE_OPTIONS =
+            Map.of("connector", TestSimpleDynamicTableSourceFactory.IDENTIFIER());
+
     @Test
-    public void testCreateTableAsWithNotFoundColumnIdentifiers() {
+    void testCreateTableAsWithNotFoundColumnIdentifiers() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -58,6 +62,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.INT())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -71,7 +76,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithMismatchIdentifiersLength() {
+    void testCreateTableAsWithMismatchIdentifiersLength() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -79,6 +84,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.INT())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -94,7 +100,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithColumns() {
+    void testCreateTableAsWithColumns() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -102,6 +108,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.TIMESTAMP(3))
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -135,7 +142,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithColumnsOverridden() {
+    void testCreateTableAsWithColumnsOverridden() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -145,6 +152,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f2", DataTypes.TIMESTAMP(3))
                                         .column("f3", DataTypes.STRING())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -173,7 +181,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithOverriddenVirtualMetadataColumnsNotAllowed() {
+    void testCreateTableAsWithOverriddenVirtualMetadataColumnsNotAllowed() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -181,6 +189,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.BIGINT())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -198,7 +207,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithOverriddenComputedColumnsNotAllowed() {
+    void testCreateTableAsWithOverriddenComputedColumnsNotAllowed() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -206,6 +215,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.BIGINT())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -221,7 +231,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithPrimaryAndPartitionKey() {
+    void testCreateTableAsWithPrimaryAndPartitionKey() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -229,6 +239,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.TIMESTAMP(3))
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -255,7 +266,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithWatermark() {
+    void testCreateTableAsWithWatermark() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -263,6 +274,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.TIMESTAMP(3))
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -289,7 +301,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithNotNullColumnsAreNotAllowed() {
+    void testCreateTableAsWithNotNullColumnsAreNotAllowed() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -297,6 +309,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.INT())
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -310,7 +323,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testCreateTableAsWithIncompatibleImplicitCastTypes() {
+    void testCreateTableAsWithIncompatibleImplicitCastTypes() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -318,6 +331,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.TIMESTAMP(3))
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(
@@ -334,7 +348,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testMergingCreateTableAsWithDistribution() {
+    void testMergingCreateTableAsWithDistribution() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -344,6 +358,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .columnByExpression("f2", "`f0` + 12345")
                                         .watermark("f1", "`f1` - interval '1' second")
                                         .build())
+                        .options(TABLE_OPTIONS)
                         .distribution(TableDistribution.ofHash(Collections.singletonList("f0"), 3))
                         .partitionKeys(Arrays.asList("f0", "f1"))
                         .build();
@@ -373,9 +388,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
     }
 
     @Test
-    public void testMergingCreateTableAsWitEmptyDistribution() {
-        Map<String, String> sourceProperties = new HashMap<>();
-        sourceProperties.put("format.type", "json");
+    void testMergingCreateTableAsWitEmptyDistribution() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -387,7 +400,7 @@ public class SqlCTASNodeToOperationTest extends SqlNodeToOperationConversionTest
                                         .build())
                         .distribution(TableDistribution.ofHash(Collections.singletonList("f0"), 3))
                         .partitionKeys(Arrays.asList("f0", "f1"))
-                        .options(sourceProperties)
+                        .options(TABLE_OPTIONS)
                         .build();
 
         catalogManager.createTable(

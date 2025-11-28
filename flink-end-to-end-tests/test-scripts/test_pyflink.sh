@@ -85,19 +85,19 @@ export FLINK_CONF_DIR="${TEST_DATA_DIR}/conf"
 
 FLINK_PYTHON_DIR=`cd "${CURRENT_DIR}/../../flink-python" && pwd -P`
 
-CONDA_HOME="${FLINK_PYTHON_DIR}/dev/.conda"
+UV_HOME="${FLINK_PYTHON_DIR}/dev/.uv"
 
-"${FLINK_PYTHON_DIR}/dev/lint-python.sh" -s miniconda
+"${FLINK_PYTHON_DIR}/dev/lint-python.sh" -s uv
 
-PYTHON_EXEC="${CONDA_HOME}/bin/python"
+PYTHON_EXEC="${UV_HOME}/bin/python"
 
-source "${CONDA_HOME}/bin/activate"
+source "${UV_HOME}/bin/activate"
 
 cd "${FLINK_PYTHON_DIR}"
 
 rm -rf dist
 
-pip install -r dev/dev-requirements.txt
+uv pip install --group dev
 
 python setup.py sdist
 
@@ -105,17 +105,15 @@ pushd apache-flink-libraries
 
 python setup.py sdist
 
-pip install dist/*
+uv pip install dist/*
 
 popd
 
-pip install dist/*
+uv pip install dist/*
 
 cd dev
 
-rm -rf .conda/pkgs
-
-zip -q -r "${TEST_DATA_DIR}/venv.zip" .conda
+zip -q -r "${TEST_DATA_DIR}/venv.zip" .uv
 
 deactivate
 
@@ -128,7 +126,7 @@ echo "Test PyFlink Table job:"
 FLINK_PYTHON_TEST_DIR=`cd "${CURRENT_DIR}/../flink-python-test" && pwd -P`
 REQUIREMENTS_PATH="${TEST_DATA_DIR}/requirements.txt"
 
-echo "pytest==4.4.1" > "${REQUIREMENTS_PATH}"
+echo "pytest==8.3.5" > "${REQUIREMENTS_PATH}"
 
 echo "Test submitting python job with 'pipeline.jars':\n"
 PYFLINK_CLIENT_EXECUTABLE=${PYTHON_EXEC} "${FLINK_DIR}/bin/flink" run \
@@ -136,7 +134,7 @@ PYFLINK_CLIENT_EXECUTABLE=${PYTHON_EXEC} "${FLINK_DIR}/bin/flink" run \
     -pyfs "${FLINK_PYTHON_TEST_DIR}/python/add_one.py" \
     -pyreq "${REQUIREMENTS_PATH}" \
     -pyarch "${TEST_DATA_DIR}/venv.zip" \
-    -pyexec "venv.zip/.conda/bin/python" \
+    -pyexec "venv.zip/.uv/bin/python" \
     -py "${FLINK_PYTHON_TEST_DIR}/python/python_job.py" \
     pipeline.jars "file://${FLINK_PYTHON_TEST_DIR}/target/PythonUdfSqlJobExample.jar"
 
@@ -146,7 +144,7 @@ PYFLINK_CLIENT_EXECUTABLE=${PYTHON_EXEC} "${FLINK_DIR}/bin/flink" run \
     -pyfs "${FLINK_PYTHON_TEST_DIR}/python/add_one.py" \
     -pyreq "${REQUIREMENTS_PATH}" \
     -pyarch "${TEST_DATA_DIR}/venv.zip" \
-    -pyexec "venv.zip/.conda/bin/python" \
+    -pyexec "venv.zip/.uv/bin/python" \
     -py "${FLINK_PYTHON_TEST_DIR}/python/python_job.py" \
     pipeline.classpaths "file://${FLINK_PYTHON_TEST_DIR}/target/PythonUdfSqlJobExample.jar"
 
@@ -156,7 +154,7 @@ PYFLINK_CLIENT_EXECUTABLE=${PYTHON_EXEC} "${FLINK_DIR}/bin/flink" run \
     -pyfs "${FLINK_PYTHON_TEST_DIR}/python/add_one.py" \
     -pyreq "${REQUIREMENTS_PATH}" \
     -pyarch "${TEST_DATA_DIR}/venv.zip" \
-    -pyexec "venv.zip/.conda/bin/python" \
+    -pyexec "venv.zip/.uv/bin/python" \
     "${FLINK_PYTHON_TEST_DIR}/target/PythonUdfSqlJobExample.jar"
 
 echo "Test batch python udf sql job:\n"
@@ -165,7 +163,7 @@ PYFLINK_CLIENT_EXECUTABLE=${PYTHON_EXEC} "${FLINK_DIR}/bin/flink" run \
     -pyfs "${FLINK_PYTHON_TEST_DIR}/python/add_one.py" \
     -pyreq "${REQUIREMENTS_PATH}" \
     -pyarch "${TEST_DATA_DIR}/venv.zip" \
-    -pyexec "venv.zip/.conda/bin/python" \
+    -pyexec "venv.zip/.uv/bin/python" \
     -c org.apache.flink.python.tests.BatchPythonUdfSqlJob \
     "${FLINK_PYTHON_TEST_DIR}/target/PythonUdfSqlJobExample.jar"
 
@@ -181,6 +179,8 @@ CREATE TABLE sink (
   'format' = 'csv'
 );
 
+SET 'python.logging.level.overrides' = 'add_one: DEBUG';
+
 CREATE FUNCTION add_one AS 'add_one.add_one' LANGUAGE PYTHON;
 
 SET 'python.client.executable'='$PYTHON_EXEC';
@@ -192,10 +192,19 @@ JOB_ID=$($FLINK_DIR/bin/sql-client.sh \
   -pyfs "${FLINK_PYTHON_TEST_DIR}/python/add_one.py" \
   -pyreq "${REQUIREMENTS_PATH}" \
   -pyarch "${TEST_DATA_DIR}/venv.zip" \
-  -pyexec "venv.zip/.conda/bin/python" \
+  -pyexec "venv.zip/.uv/bin/python" \
   -f "$SUBMITTED_SQL" | grep "Job ID:" | sed 's/.* //g')
 
 wait_job_terminal_state "$JOB_ID" "FINISHED"
+
+# check logs
+captured_log="DEBUG: input is"
+grep_debug_cmd="grep -c '$captured_log' $FLINK_LOG_DIR/*taskexecutor*.log"
+debug_line_cnt=$(eval "$grep_debug_cmd")
+if [[ ${debug_line_cnt} -lt 0 ]]; then
+  echo "Don't find any PythonFunction debug lines."
+  EXIT_CODE=1
+fi
 
 # Note: The 'data_stream_job.py' still uses the Kafka legacy source,
 # so we temporarily disable this case because we plan to address this
@@ -249,7 +258,8 @@ wait_job_terminal_state "$JOB_ID" "FINISHED"
 #     -pyfs "${FLINK_PYTHON_TEST_DIR}/python/datastream" \
 #     -pyreq "${REQUIREMENTS_PATH}" \
 #     -pyarch "${TEST_DATA_DIR}/venv.zip" \
-#     -pyexec "venv.zip/.conda/bin/python" \
+#     -pyexec "venv.zip/.uv/bin/python" \
+#     -pyclientexec "venv.zip/.uv/bin/python" \
 #     -pym "data_stream_job" \
 #     -j "${KAFKA_SQL_JAR}")
 

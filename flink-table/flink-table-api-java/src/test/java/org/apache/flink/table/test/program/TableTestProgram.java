@@ -20,6 +20,8 @@ package org.apache.flink.table.test.program;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableRuntimeException;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.test.program.FunctionTestStep.FunctionBehavior;
@@ -135,7 +137,7 @@ public class TableTestProgram {
         return new Builder(id, description);
     }
 
-    /** Convenience method to avoid casting. It assumes that the order of steps is not important. */
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
     public List<SourceTestStep> getSetupSourceTestSteps() {
         final EnumSet<TestKind> sourceKinds =
                 EnumSet.of(
@@ -148,7 +150,7 @@ public class TableTestProgram {
                 .collect(Collectors.toList());
     }
 
-    /** Convenience method to avoid casting. It assumes that the order of steps is not important. */
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
     public List<SinkTestStep> getSetupSinkTestSteps() {
         final EnumSet<TestKind> sinkKinds =
                 EnumSet.of(
@@ -161,7 +163,15 @@ public class TableTestProgram {
                 .collect(Collectors.toList());
     }
 
-    /** Convenience method to avoid casting. It assumes that the order of steps is not important. */
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
+    public List<ModelTestStep> getSetupModelTestSteps() {
+        return setupSteps.stream()
+                .filter(s -> s.getKind() == TestKind.MODEL)
+                .map(ModelTestStep.class::cast)
+                .collect(Collectors.toList());
+    }
+
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
     public List<ConfigOptionTestStep<?>> getSetupConfigOptionTestSteps() {
         return setupSteps.stream()
                 .filter(s -> s.getKind() == TestKind.CONFIG)
@@ -169,7 +179,7 @@ public class TableTestProgram {
                 .collect(Collectors.toList());
     }
 
-    /** Convenience method to avoid casting. It assumes that the order of steps is not important. */
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
     public List<FunctionTestStep> getSetupFunctionTestSteps() {
         return setupSteps.stream()
                 .filter(s -> s.getKind() == TestKind.FUNCTION)
@@ -177,7 +187,15 @@ public class TableTestProgram {
                 .collect(Collectors.toList());
     }
 
-    /** Convenience method to avoid casting. It assumes that the order of steps is not important. */
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
+    public List<SqlTestStep> getSetupSqlTestSteps() {
+        return setupSteps.stream()
+                .filter(s -> s.getKind() == TestKind.SQL)
+                .map(SqlTestStep.class::cast)
+                .collect(Collectors.toList());
+    }
+
+    /** A helper method to avoid casting. It assumes that the order of steps is not important. */
     public List<TemporalFunctionTestStep> getSetupTemporalFunctionTestSteps() {
         return setupSteps.stream()
                 .filter(s -> s.getKind() == TestKind.TEMPORAL_FUNCTION)
@@ -186,7 +204,7 @@ public class TableTestProgram {
     }
 
     /**
-     * Convenience method to avoid boilerplate code. It assumes that only a single SQL statement is
+     * A helper method to avoid boilerplate code. It assumes that only a single SQL statement is
      * tested.
      */
     public SqlTestStep getRunSqlTestStep() {
@@ -198,9 +216,7 @@ public class TableTestProgram {
         return (SqlTestStep) sqlSteps.get(0);
     }
 
-    /**
-     * Convenience method to avoid boilerplate code. It assumes only one statement set is tested.
-     */
+    /** A helper method to avoid boilerplate code. It assumes only one statement set is tested. */
     public StatementSetTestStep getRunStatementSetTestStep() {
         List<TestStep> statementSetSteps =
                 runSteps.stream()
@@ -303,6 +319,16 @@ public class TableTestProgram {
         }
 
         /**
+         * Setup steps for each table source.
+         *
+         * <p>Use {@link SourceTestStep.Builder} to construct this step.
+         */
+        public Builder setupTableSources(List<SourceTestStep> sourceTestSteps) {
+            setupSteps.addAll(sourceTestSteps);
+            return this;
+        }
+
+        /**
          * Setup step for a table sink.
          *
          * <p>Use {@link SinkTestStep.Builder} to construct this step.
@@ -312,9 +338,57 @@ public class TableTestProgram {
             return this;
         }
 
+        /**
+         * Setup steps for each table sink.
+         *
+         * <p>Use {@link SinkTestStep.Builder} to construct this step.
+         */
+        public Builder setupTableSinks(List<SinkTestStep> sinkTestSteps) {
+            setupSteps.addAll(sinkTestSteps);
+            return this;
+        }
+
+        /**
+         * Setup step for a model.
+         *
+         * <p>Use {@link ModelTestStep.Builder} to construct this step.
+         */
+        public Builder setupModel(ModelTestStep modelTestStep) {
+            setupSteps.add(modelTestStep);
+            return this;
+        }
+
         /** Run step for executing SQL. */
         public Builder runSql(String sql) {
             this.runSteps.add(new SqlTestStep(sql));
+            return this;
+        }
+
+        /**
+         * Run step for executing SQL that will fail eventually with a {@link
+         * TableRuntimeException}.
+         */
+        public Builder runFailingSql(
+                String sql,
+                Class<? extends Exception> expectedException,
+                String expectedErrorMessage) {
+            this.runSteps.add(new FailingSqlTestStep(sql, expectedException, expectedErrorMessage));
+            return this;
+        }
+
+        /**
+         * Run step for executing a Table API query that will fail eventually with either {@link
+         * ValidationException} (during planning time) or {@link TableRuntimeException} (during
+         * execution time).
+         */
+        public Builder runFailingTableApi(
+                Function<TableEnvAccessor, Table> toTable,
+                String sinkName,
+                Class<? extends Exception> expectedException,
+                String expectedErrorMessage) {
+            this.runSteps.add(
+                    new FailingTableApiTestStep(
+                            toTable, sinkName, expectedException, expectedErrorMessage));
             return this;
         }
 

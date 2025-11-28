@@ -69,6 +69,9 @@ public class ConfigurationOptionLocator {
                         "flink-state-backends/flink-statebackend-rocksdb",
                         "org.apache.flink.state.rocksdb"),
                 new OptionsClassLocation(
+                        "flink-state-backends/flink-statebackend-forst",
+                        "org.apache.flink.state.forst"),
+                new OptionsClassLocation(
                         "flink-table/flink-table-api-java", "org.apache.flink.table.api.config"),
                 new OptionsClassLocation("flink-python", "org.apache.flink.python"),
                 new OptionsClassLocation(
@@ -85,7 +88,9 @@ public class ConfigurationOptionLocator {
                         "org.apache.flink.table.gateway.rest.util"),
                 new OptionsClassLocation(
                         "flink-external-resources/flink-external-resource-gpu",
-                        "org.apache.flink.externalresource.gpu")
+                        "org.apache.flink.externalresource.gpu"),
+                new OptionsClassLocation(
+                        "flink-models/flink-model-openai", "org.apache.flink.model.openai")
             };
 
     private static final Set<String> EXCLUSIONS =

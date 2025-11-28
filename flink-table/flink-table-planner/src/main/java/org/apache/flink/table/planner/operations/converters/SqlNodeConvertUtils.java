@@ -23,12 +23,14 @@ import org.apache.flink.sql.parser.error.SqlValidateException;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.CatalogBaseTable;
-import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
+import org.apache.flink.table.catalog.ResolvedCatalogView;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
+import org.apache.flink.table.operations.utils.ValidationUtils;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
 import org.apache.flink.table.planner.operations.converters.SqlNodeConverter.ConvertContext;
 
@@ -83,11 +85,7 @@ class SqlNodeConvertUtils {
                 context.getSqlValidator().getNamespace(validateQuery);
         validateDuplicatedColumnNames(query, viewFields, validatedNamespace);
 
-        // The LATERAL operator was eliminated during sql validation, thus the unparsed SQL
-        // does not contain LATERAL which is problematic,
-        // the issue was resolved in CALCITE-4077
-        // (always treat the table function as implicitly LATERAL).
-        String expandedQuery = context.expandSqlIdentifiers(originalQuery);
+        String expandedQuery = context.toQuotedSqlString(query);
 
         PlannerQueryOperation operation = toQueryOperation(validateQuery, context);
         ResolvedSchema schema = operation.getResolvedSchema();
@@ -110,12 +108,14 @@ class SqlNodeConvertUtils {
             schema = ResolvedSchema.physical(aliasFieldNames, schema.getColumnDataTypes());
         }
 
-        return CatalogView.of(
-                Schema.newBuilder().fromResolvedSchema(schema).build(),
-                viewComment,
-                originalQuery,
-                expandedQuery,
-                viewOptions);
+        return new ResolvedCatalogView(
+                CatalogView.of(
+                        Schema.newBuilder().fromResolvedSchema(schema).build(),
+                        viewComment,
+                        originalQuery,
+                        expandedQuery,
+                        viewOptions),
+                schema);
     }
 
     /**
@@ -123,21 +123,20 @@ class SqlNodeConvertUtils {
      */
     static CatalogView validateAlterView(SqlAlterView alterView, ConvertContext context) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(alterView.fullViewName());
+                UnresolvedIdentifier.of(alterView.getFullName());
         ObjectIdentifier viewIdentifier =
                 context.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
         Optional<ContextResolvedTable> optionalCatalogTable =
                 context.getCatalogManager().getTable(viewIdentifier);
         // check the view exist and is not a temporary view
-        if (!optionalCatalogTable.isPresent() || optionalCatalogTable.get().isTemporary()) {
+        if (optionalCatalogTable.isEmpty() || optionalCatalogTable.get().isTemporary()) {
             throw new ValidationException(
                     String.format("View %s doesn't exist or is a temporary view.", viewIdentifier));
         }
         // check the view is exactly a view
         CatalogBaseTable baseTable = optionalCatalogTable.get().getResolvedTable();
-        if (baseTable instanceof CatalogTable) {
-            throw new ValidationException("ALTER VIEW for a table is not allowed");
-        }
+        ValidationUtils.validateTableKind(baseTable, TableKind.VIEW, "alter view");
+
         return (CatalogView) baseTable;
     }
 

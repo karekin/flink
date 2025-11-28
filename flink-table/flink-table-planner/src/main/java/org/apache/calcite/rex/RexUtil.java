@@ -16,6 +16,8 @@
  */
 package org.apache.calcite.rex;
 
+import org.apache.flink.table.planner.calcite.RexTableArgCall;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -61,12 +63,14 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -74,7 +78,7 @@ import static java.util.Objects.requireNonNull;
  * because of current Calcite way of inferring constants from IS NOT DISTINCT FROM clashes with
  * filter push down.
  *
- * <p>Lines 397 ~ 399, Use Calcite 1.32.0 behavior for {@link RexUtil#gatherConstraints(Class,
+ * <p>Lines 399 ~ 401, Use Calcite 1.32.0 behavior for {@link RexUtil#gatherConstraints(Class,
  * RexNode, Map, Set, RexBuilder)}.
  */
 public class RexUtil {
@@ -140,7 +144,7 @@ public class RexUtil {
             if (lhsType.equals(rhsType)) {
                 castExps.add(rhsExp);
             } else {
-                castExps.add(rexBuilder.makeCast(lhsType, rhsExp));
+                castExps.add(rexBuilder.makeCast(lhsType, rhsExp, true, false));
             }
         }
         return castExps;
@@ -663,7 +667,7 @@ public class RexUtil {
                                                             type,
                                                             true,
                                                             true)))
-                            .collect(Util.toImmutableList());
+                            .collect(toImmutableList());
             orList.add(composeConjunction(rexBuilder, list));
         } else {
             final RangeSets.Consumer<C> consumer = new RangeToRex<>(ref, orList, rexBuilder, type);
@@ -879,6 +883,14 @@ public class RexUtil {
                         @Override
                         public Void visitInputRef(RexInputRef inputRef) {
                             throw new Util.FoundOne(inputRef);
+                        }
+
+                        @Override
+                        public Void visitCall(RexCall call) {
+                            if (call instanceof RexTableArgCall) {
+                                throw new Util.FoundOne(call);
+                            }
+                            return super.visitCall(call);
                         }
                     };
             node.accept(visitor);
@@ -1571,9 +1583,8 @@ public class RexUtil {
      * Returns whether a call to {@code op} with {@code exprs} as arguments would be considered
      * "flat".
      *
-     * <p>For example, {@code isFlat([w, AND[x, y], z, AND)} returns false;
-     *
-     * <p>{@code isFlat([w, x, y, z], AND)} returns true.
+     * <p>For example, {@code isFlat([w, AND[x, y], z, AND)} returns false; {@code isFlat([w, x, y,
+     * z], AND)} returns true.
      */
     private static boolean isFlat(List<? extends RexNode> exprs, final SqlOperator op) {
         return !isAssociative(op)
@@ -2679,8 +2690,9 @@ public class RexUtil {
             return list;
         }
 
-        private static Map<RexNode, RexNode> commonFactors(List<RexNode> nodes) {
-            final Map<RexNode, RexNode> map = new HashMap<>();
+        private static LinkedHashMap<RexNode, RexNode> commonFactors(List<RexNode> nodes) {
+            // make sure the result is in deterministic order
+            final LinkedHashMap<RexNode, RexNode> map = new LinkedHashMap<>();
             int i = 0;
             for (RexNode node : nodes) {
                 if (i++ == 0) {
@@ -2989,7 +3001,8 @@ public class RexUtil {
             if (simplifiedNode.getType().equals(call.getType())) {
                 return simplifiedNode;
             }
-            return simplify.rexBuilder.makeCast(call.getType(), simplifiedNode, matchNullability);
+            return simplify.rexBuilder.makeCast(
+                    call.getType(), simplifiedNode, matchNullability, false);
         }
     }
 

@@ -20,6 +20,7 @@ package org.apache.flink.table.types.inference;
 
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.functions.UserDefinedFunctionHelper;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.util.Preconditions;
 
@@ -58,16 +59,19 @@ public final class TypeInference {
     private final InputTypeStrategy inputTypeStrategy;
     private final LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies;
     private final TypeStrategy outputTypeStrategy;
+    private final boolean disableSystemArguments;
 
     private TypeInference(
             @Nullable List<StaticArgument> staticArguments,
             InputTypeStrategy inputTypeStrategy,
             LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies,
-            TypeStrategy outputTypeStrategy) {
+            TypeStrategy outputTypeStrategy,
+            boolean disableSystemArguments) {
         this.staticArguments = staticArguments;
         this.inputTypeStrategy = inputTypeStrategy;
         this.stateTypeStrategies = stateTypeStrategies;
         this.outputTypeStrategy = outputTypeStrategy;
+        this.disableSystemArguments = disableSystemArguments;
         checkStateEntries();
     }
 
@@ -90,6 +94,10 @@ public final class TypeInference {
 
     public TypeStrategy getOutputTypeStrategy() {
         return outputTypeStrategy;
+    }
+
+    public boolean disableSystemArguments() {
+        return disableSystemArguments;
     }
 
     /**
@@ -160,7 +168,7 @@ public final class TypeInference {
                         .collect(Collectors.toList());
         if (!invalidStateEntries.isEmpty()) {
             throw new ValidationException(
-                    "Invalid state names. A state entry must follow the pattern [a-zA-Z_$][a-zA-Z_$0-9]. But found: "
+                    "Invalid state names. A state entry must follow the pattern [a-zA-Z_$][a-zA-Z_$0-9]*. But found: "
                             + invalidStateEntries);
         }
     }
@@ -178,6 +186,8 @@ public final class TypeInference {
         private LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies =
                 new LinkedHashMap<>();
         private @Nullable TypeStrategy outputTypeStrategy;
+
+        private boolean disableSystemArguments = false;
 
         // Legacy
         private @Nullable List<String> namedArguments;
@@ -234,7 +244,8 @@ public final class TypeInference {
             Preconditions.checkNotNull(
                     accumulatorTypeStrategy, "Accumulator type strategy must not be null.");
             this.stateTypeStrategies.put(
-                    "acc", StateTypeStrategyWrapper.of(accumulatorTypeStrategy));
+                    UserDefinedFunctionHelper.DEFAULT_ACCUMULATOR_NAME,
+                    StateTypeStrategy.of(accumulatorTypeStrategy));
             return this;
         }
 
@@ -246,6 +257,16 @@ public final class TypeInference {
         public Builder stateTypeStrategies(
                 LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies) {
             this.stateTypeStrategies = stateTypeStrategies;
+            return this;
+        }
+
+        /**
+         * Sets whether system arguments are allowed in addition to the declared arguments for PTFs.
+         * If disabled, uid and time attributes arguments will not be added to PTF input arguments
+         * automatically.
+         */
+        public Builder disableSystemArguments(boolean disableSystemArguments) {
+            this.disableSystemArguments = disableSystemArguments;
             return this;
         }
 
@@ -267,7 +288,8 @@ public final class TypeInference {
                     inputTypeStrategy,
                     stateTypeStrategies,
                     Preconditions.checkNotNull(
-                            outputTypeStrategy, "Output type strategy must not be null."));
+                            outputTypeStrategy, "Output type strategy must not be null."),
+                    disableSystemArguments);
         }
 
         /**

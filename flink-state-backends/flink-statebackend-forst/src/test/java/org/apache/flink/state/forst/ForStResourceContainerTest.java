@@ -18,9 +18,11 @@
 
 package org.apache.flink.state.forst;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.filesystem.FsCheckpointStorageAccess;
 import org.apache.flink.state.forst.fs.ForStFlinkFileSystem;
 import org.apache.flink.state.forst.fs.StringifiedForStFileSystem;
 import org.apache.flink.util.function.ThrowingRunnable;
@@ -306,11 +308,28 @@ public class ForStResourceContainerTest {
 
     @Test
     public void testDirectoryResources() throws Exception {
-        Path localBasePath = new Path(TMP_FOLDER.newFolder().getPath());
-        Path remoteBasePath = new Path(TMP_FOLDER.newFolder().getPath());
+        Path localJobPath = new Path(TMP_FOLDER.newFolder().getPath());
+        Path localBasePath = new Path(localJobPath, "base");
+        localBasePath.getFileSystem().mkdirs(localBasePath);
+        Path remoteJobPath = new Path(TMP_FOLDER.newFolder().getPath());
+        Path remoteBasePath = new Path(remoteJobPath, "base");
+        remoteBasePath.getFileSystem().mkdirs(remoteBasePath);
         try (final ForStResourceContainer optionsContainer =
                 new ForStResourceContainer(
-                        new Configuration(), null, null, localBasePath, remoteBasePath, false)) {
+                        new Configuration(),
+                        null,
+                        null,
+                        ForStPathContainer.of(
+                                localJobPath, localBasePath, remoteJobPath, remoteBasePath),
+                        null,
+                        new FsCheckpointStorageAccess(
+                                new Path(TMP_FOLDER.newFolder().getPath()),
+                                null,
+                                new JobID(),
+                                1024,
+                                4096),
+                        null,
+                        false)) {
             optionsContainer.prepareDirectories();
             assertTrue(new File(localBasePath.getPath()).exists());
             assertTrue(new File(remoteBasePath.getPath()).exists());
@@ -318,7 +337,12 @@ public class ForStResourceContainerTest {
 
             optionsContainer.clearDirectories();
             assertFalse(new File(localBasePath.getPath()).exists());
-            assertFalse(new File(remoteBasePath.getPath()).exists());
+
+            assertTrue(new File(remoteBasePath.getPath()).exists());
+            optionsContainer.forceClearRemoteDirectories();
+
+            // Do not delete remote directory because it is not created by ForStResourceContainer
+            assertTrue(new File(remoteBasePath.getPath()).exists());
         }
     }
 

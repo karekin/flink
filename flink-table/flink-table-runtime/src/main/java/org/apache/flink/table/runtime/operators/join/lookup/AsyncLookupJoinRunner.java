@@ -24,8 +24,8 @@ import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.util.FunctionUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.async.AsyncFunction;
+import org.apache.flink.streaming.api.functions.async.CollectionSupplier;
 import org.apache.flink.streaming.api.functions.async.ResultFuture;
-import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.conversion.DataStructureConverter;
@@ -34,6 +34,7 @@ import org.apache.flink.table.runtime.collector.TableFunctionResultFuture;
 import org.apache.flink.table.runtime.generated.FilterCondition;
 import org.apache.flink.table.runtime.generated.GeneratedFunction;
 import org.apache.flink.table.runtime.generated.GeneratedResultFuture;
+import org.apache.flink.table.runtime.operators.AbstractAsyncFunctionRunner;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 
 import java.util.ArrayList;
@@ -44,18 +45,15 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 
 /** The async join runner to lookup the dimension table. */
-public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
+public class AsyncLookupJoinRunner extends AbstractAsyncFunctionRunner<Object> {
     private static final long serialVersionUID = -6664660022391632480L;
 
-    private final GeneratedFunction<AsyncFunction<RowData, Object>> generatedFetcher;
     private final DataStructureConverter<RowData, Object> fetcherConverter;
     private final GeneratedResultFuture<TableFunctionResultFuture<RowData>> generatedResultFuture;
     private final GeneratedFunction<FilterCondition> generatedPreFilterCondition;
 
     private final boolean isLeftOuterJoin;
     private final int asyncBufferCapacity;
-
-    private transient AsyncFunction<RowData, Object> fetcher;
 
     protected final RowDataSerializer rightRowSerializer;
 
@@ -82,7 +80,7 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
             RowDataSerializer rightRowSerializer,
             boolean isLeftOuterJoin,
             int asyncBufferCapacity) {
-        this.generatedFetcher = generatedFetcher;
+        super(generatedFetcher);
         this.fetcherConverter = fetcherConverter;
         this.generatedResultFuture = generatedResultFuture;
         this.generatedPreFilterCondition = generatedPreFilterCondition;
@@ -95,11 +93,9 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
     public void open(OpenContext openContext) throws Exception {
         super.open(openContext);
         ClassLoader cl = getRuntimeContext().getUserCodeClassLoader();
-        this.fetcher = generatedFetcher.newInstance(cl);
         this.preFilterCondition = generatedPreFilterCondition.newInstance(cl);
         FunctionUtils.setFunctionRuntimeContext(fetcher, getRuntimeContext());
         FunctionUtils.setFunctionRuntimeContext(preFilterCondition, getRuntimeContext());
-        FunctionUtils.openFunction(fetcher, openContext);
         FunctionUtils.openFunction(preFilterCondition, openContext);
 
         // try to compile the generated ResultFuture, fail fast if the code is corrupt.
@@ -131,7 +127,7 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
         // the input row is copied when object reuse in AsyncWaitOperator
         outResultFuture.reset(input, resultFuture);
 
-        if (preFilterCondition.apply(input)) {
+        if (preFilterCondition.apply(FilterCondition.Context.INVALID_CONTEXT, input)) {
             // fetcher has copied the input field when object reuse is enabled
             fetcher.asyncInvoke(input, outResultFuture);
         } else {
@@ -151,9 +147,6 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
     @Override
     public void close() throws Exception {
         super.close();
-        if (fetcher != null) {
-            FunctionUtils.closeFunction(fetcher);
-        }
         if (preFilterCondition != null) {
             FunctionUtils.closeFunction(preFilterCondition);
         }
@@ -274,6 +267,15 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
             realOutput.completeExceptionally(error);
         }
 
+        /**
+         * Unsupported, because the containing classes are AsyncFunctions which don't have access to
+         * the mailbox to invoke from the caller thread.
+         */
+        @Override
+        public void complete(CollectionSupplier<Object> supplier) {
+            throw new UnsupportedOperationException();
+        }
+
         public void close() throws Exception {
             joinConditionResultFuture.close();
         }
@@ -294,6 +296,15 @@ public class AsyncLookupJoinRunner extends RichAsyncFunction<RowData, RowData> {
             @Override
             public void completeExceptionally(Throwable error) {
                 JoinedRowResultFuture.this.completeExceptionally(error);
+            }
+
+            /**
+             * Unsupported, because the containing classes are AsyncFunctions which don't have
+             * access to the mailbox to invoke from the caller thread.
+             */
+            @Override
+            public void complete(CollectionSupplier<RowData> supplier) {
+                throw new UnsupportedOperationException();
             }
         }
     }

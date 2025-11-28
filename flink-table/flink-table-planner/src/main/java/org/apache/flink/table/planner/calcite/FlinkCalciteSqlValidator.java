@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.calcite;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.sql.parser.FlinkSqlParsingValidator;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.config.TableConfigOptions;
@@ -26,7 +27,10 @@ import org.apache.flink.table.api.config.TableConfigOptions.ColumnExpansionStrat
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.planner.catalog.CatalogSchemaModel;
 import org.apache.flink.table.planner.catalog.CatalogSchemaTable;
+import org.apache.flink.table.planner.functions.sql.ml.SqlMLTableFunction;
+import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader;
 import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.DecimalType;
@@ -43,12 +47,14 @@ import org.apache.calcite.sql.JoinType;
 import org.apache.calcite.sql.SqlAsOperator;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlExplicitModelCall;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlJoin;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlModelCall;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperator;
@@ -67,7 +73,6 @@ import org.apache.calcite.sql.validate.SelectScope;
 import org.apache.calcite.sql.validate.SqlQualified;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorCatalogReader;
-import org.apache.calcite.sql.validate.SqlValidatorImpl;
 import org.apache.calcite.sql.validate.SqlValidatorNamespace;
 import org.apache.calcite.sql.validate.SqlValidatorScope;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
@@ -95,7 +100,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** Extends Calcite's {@link SqlValidator} by Flink-specific behavior. */
 @Internal
-public final class FlinkCalciteSqlValidator extends SqlValidatorImpl {
+public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
 
     // Enables CallContext#getOutputDataType() when validating SQL expressions.
     private SqlNode sqlNodeForExpectedOutputType;
@@ -117,13 +122,23 @@ public final class FlinkCalciteSqlValidator extends SqlValidatorImpl {
             RelOptTable.ToRelContext toRelcontext,
             RelOptCluster relOptCluster,
             FrameworkConfig frameworkConfig) {
-        super(opTab, catalogReader, typeFactory, config);
+        super(
+                opTab,
+                catalogReader,
+                typeFactory,
+                config,
+                ShortcutUtils.unwrapTableConfig(relOptCluster)
+                        .get(TableConfigOptions.LEGACY_NESTED_ROW_NULLABILITY));
         this.relOptCluster = relOptCluster;
         this.toRelContext = toRelcontext;
         this.frameworkConfig = frameworkConfig;
         this.columnExpansionStrategies =
                 ShortcutUtils.unwrapTableConfig(relOptCluster)
                         .get(TableConfigOptions.TABLE_COLUMN_EXPANSION_STRATEGY);
+    }
+
+    public RelOptCluster getRelOptCluster() {
+        return relOptCluster;
     }
 
     public void setExpectedOutputType(SqlNode sqlNode, RelDataType expectedOutputType) {
@@ -179,15 +194,6 @@ public final class FlinkCalciteSqlValidator extends SqlValidatorImpl {
             }
         }
         super.validateJoin(join, scope);
-    }
-
-    @Override
-    public void validateColumnListParams(
-            SqlFunction function, List<RelDataType> argTypes, List<SqlNode> operands) {
-        // we don't support column lists and translate them into the unknown type in the type
-        // factory,
-        // this makes it possible to ignore them in the validator and fall back to regular row types
-        // see also SqlFunction#deriveType
     }
 
     @Override
@@ -373,7 +379,21 @@ public final class FlinkCalciteSqlValidator extends SqlValidatorImpl {
         final SqlBasicCall call = (SqlBasicCall) node;
         final SqlOperator operator = call.getOperator();
 
-        if (operator instanceof SqlWindowTableFunction) {
+        if (node instanceof SqlExplicitModelCall) {
+            // Convert it so that model can be accessed in planner. SqlExplicitModelCall
+            // from parser can't access model.
+            SqlExplicitModelCall modelCall = (SqlExplicitModelCall) node;
+            SqlIdentifier modelIdentifier = modelCall.getModelIdentifier();
+            FlinkCalciteCatalogReader catalogReader =
+                    (FlinkCalciteCatalogReader) getCatalogReader();
+            CatalogSchemaModel model = catalogReader.getModel(modelIdentifier.names);
+            if (model != null) {
+                return new SqlModelCall(modelCall, model);
+            }
+        }
+
+        // TODO (FLINK-37819): add test for SqlMLTableFunction
+        if (operator instanceof SqlWindowTableFunction || operator instanceof SqlMLTableFunction) {
             if (tableArgs.stream().allMatch(Objects::isNull)) {
                 return rewritten;
             }

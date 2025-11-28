@@ -30,7 +30,6 @@ import org.apache.flink.table.api.config.ExecutionConfigOptions.LegacyCastBehavi
 import org.apache.flink.table.catalog.CatalogDatabaseImpl
 import org.apache.flink.table.data.{DecimalDataUtils, TimestampData}
 import org.apache.flink.table.data.util.DataFormatConverters.LocalDateConverter
-import org.apache.flink.table.legacy.api.TableSchema
 import org.apache.flink.table.planner.expressions.utils.{RichFunc1, RichFunc2, RichFunc3, SplitUDF}
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils.{BatchTableEnvUtil, BatchTestBase, TestData, UserDefinedFunctionTestUtils}
@@ -38,7 +37,7 @@ import org.apache.flink.table.planner.runtime.utils.BatchTableEnvUtil.parseField
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.TestData._
 import org.apache.flink.table.planner.runtime.utils.UserDefinedFunctionTestUtils._
-import org.apache.flink.table.planner.utils.{DateTimeTestUtil, TestLegacyFilterableTableSource}
+import org.apache.flink.table.planner.utils.DateTimeTestUtil
 import org.apache.flink.table.planner.utils.DateTimeTestUtil._
 import org.apache.flink.table.utils.DateTimeUtils.toLocalDateTime
 import org.apache.flink.types.Row
@@ -1796,12 +1795,6 @@ class CalcITCase extends BatchTestBase {
 
   @Test
   def testFilterPushDownWithInterval(): Unit = {
-    val schema = TableSchema
-      .builder()
-      .field("a", DataTypes.TIMESTAMP)
-      .field("b", DataTypes.TIMESTAMP)
-      .build()
-
     val data = List(
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2021-03-30 14:59:59")),
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2021-03-30 15:00:00")),
@@ -1811,13 +1804,18 @@ class CalcITCase extends BatchTestBase {
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2023-03-30 10:00:01"))
     )
 
-    TestLegacyFilterableTableSource.createTemporaryTable(
-      tEnv,
-      schema,
-      "myTable",
-      isBounded = true,
-      data,
-      Set("a", "b"))
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |create table myTable(
+                       |  a TIMESTAMP(3),
+                       |  b TIMESTAMP(3)
+                       |) with (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId',
+                       |  'bounded' = 'true',
+                       |  'filterable-fields' = 'a,b'
+                       |)
+                       |""".stripMargin)
 
     checkResult(
       "SELECT * FROM myTable WHERE TIMESTAMPADD(HOUR, 5, a) >= b",
@@ -2334,5 +2332,20 @@ class CalcITCase extends BatchTestBase {
   def testIfNull(): Unit = {
     // reported in FLINK-35832
     checkResult("SELECT IFNULL(JSON_VALUE('{\"a\":16}','$.a'),'0')", Seq(row("16")));
+  }
+
+  @Test
+  def testRawHash(): Unit = {
+    // reported in FLINK-38135
+    tEnv.createTemporarySystemFunction("RawOutUDF", RawOutUDF)
+    checkResult(
+      s"""
+         |SELECT str, COUNT(1) FROM (
+         |  SELECT RawOutUDF(id) AS str FROM (VALUES (0), (1), (2), (2), (1), (2)) AS t(id)
+         |)
+         |GROUP BY str
+         |""".stripMargin,
+      Seq(row(0, 1), row(1, 2), row(2, 3))
+    );
   }
 }

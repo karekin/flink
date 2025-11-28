@@ -38,7 +38,6 @@ import org.apache.flink.table.types.extraction.FunctionResultTemplate.FunctionSt
 import org.apache.flink.table.types.inference.InputTypeStrategies;
 import org.apache.flink.table.types.inference.InputTypeStrategy;
 import org.apache.flink.table.types.inference.StateTypeStrategy;
-import org.apache.flink.table.types.inference.StateTypeStrategyWrapper;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeStrategies;
@@ -107,7 +106,7 @@ public final class TypeInferenceExtractor {
                         null,
                         null,
                         createOutputFromGenericInMethod(0, 0, true),
-                        createParameterAndCompletableFutureVerification(function));
+                        createParameterAndCompletableFutureVerification(function, false));
         return extractTypeInference(mappingExtractor, false);
     }
 
@@ -173,7 +172,7 @@ public final class TypeInferenceExtractor {
                         null,
                         null,
                         createOutputFromGenericInClass(AsyncTableFunction.class, 0, true),
-                        createParameterAndCompletableFutureVerification(function));
+                        createParameterAndCompletableFutureVerification(function, true));
         return extractTypeInference(mappingExtractor, false);
     }
 
@@ -321,7 +320,7 @@ public final class TypeInferenceExtractor {
                                         e -> e.getKey().toInputTypeStrategy(),
                                         e -> e.getValue().toAccumulatorTypeStrategy()));
         final StateTypeStrategy accumulatorStrategy =
-                StateTypeStrategyWrapper.of(TypeStrategies.mapping(mappings));
+                StateTypeStrategy.of(TypeStrategies.mapping(mappings));
         final Set<String> stateNames =
                 stateMapping.values().stream()
                         .map(FunctionStateTemplate::toAccumulatorStateName)

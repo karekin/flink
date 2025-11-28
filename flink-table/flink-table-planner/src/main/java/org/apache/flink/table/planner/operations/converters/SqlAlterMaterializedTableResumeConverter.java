@@ -19,13 +19,11 @@
 package org.apache.flink.table.planner.operations.converters;
 
 import org.apache.flink.sql.parser.ddl.SqlAlterMaterializedTableResume;
-import org.apache.flink.sql.parser.ddl.SqlTableOption;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableResumeOperation;
 
-import java.util.HashMap;
 import java.util.Map;
 
 /** A converter for {@link SqlAlterMaterializedTableResume}. */
@@ -36,20 +34,12 @@ public class SqlAlterMaterializedTableResumeConverter
             SqlAlterMaterializedTableResume sqlAlterMaterializedTableResume,
             ConvertContext context) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlAlterMaterializedTableResume.fullTableName());
+                UnresolvedIdentifier.of(sqlAlterMaterializedTableResume.getFullName());
         ObjectIdentifier identifier =
                 context.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
 
         // get table options
-        Map<String, String> options = new HashMap<>();
-        sqlAlterMaterializedTableResume
-                .getPropertyList()
-                .getList()
-                .forEach(
-                        p ->
-                                options.put(
-                                        ((SqlTableOption) p).getKeyString(),
-                                        ((SqlTableOption) p).getValueString()));
+        final Map<String, String> options = sqlAlterMaterializedTableResume.getProperties();
         return new AlterMaterializedTableResumeOperation(identifier, options);
     }
 }

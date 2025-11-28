@@ -107,6 +107,10 @@ public final class DataTypeExtractor {
         this.contextExplanation = contextExplanation;
     }
 
+    // --------------------------------------------------------------------------------------------
+    // Methods that extract a data type from a JVM Type without any prior information
+    // --------------------------------------------------------------------------------------------
+
     /** Extracts a data type from a type without considering surrounding classes or templates. */
     public static DataType extractFromType(DataTypeFactory typeFactory, Type type) {
         return extractDataTypeWithClassContext(
@@ -114,7 +118,7 @@ public final class DataTypeExtractor {
     }
 
     /** Extracts a data type from a type without considering surrounding classes but templates. */
-    public static DataType extractFromType(
+    static DataType extractFromType(
             DataTypeFactory typeFactory, DataTypeTemplate template, Type type) {
         return extractDataTypeWithClassContext(typeFactory, template, null, type, "");
     }
@@ -239,6 +243,31 @@ public final class DataTypeExtractor {
                         method.getName(), baseClass.getName()));
     }
 
+    // --------------------------------------------------------------------------------------------
+    // Methods that extract a data type from a JVM Class with prior logical information
+    // --------------------------------------------------------------------------------------------
+
+    public static DataType extractFromStructuredClass(
+            DataTypeFactory typeFactory, Class<?> implementationClass) {
+        final DataType dataType =
+                extractDataTypeWithClassContext(
+                        typeFactory,
+                        DataTypeTemplate.fromDefaults(),
+                        implementationClass.getEnclosingClass(),
+                        implementationClass,
+                        "");
+        if (!dataType.getLogicalType().is(LogicalTypeRoot.STRUCTURED_TYPE)) {
+            throw extractionError(
+                    "Structured data type expected for class '%s' but was: %s",
+                    implementationClass.getName(), dataType);
+        }
+        return dataType;
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Supporting methods
+    // --------------------------------------------------------------------------------------------
+
     private static DataType extractDataTypeWithClassContext(
             DataTypeFactory typeFactory,
             DataTypeTemplate outerTemplate,
@@ -254,8 +283,6 @@ public final class DataTypeExtractor {
         }
         return extractor.extractDataTypeOrRaw(outerTemplate, typeHierarchy, type);
     }
-
-    // --------------------------------------------------------------------------------------------
 
     private DataType extractDataTypeOrRaw(
             DataTypeTemplate outerTemplate, List<Type> typeHierarchy, Type type) {
@@ -335,8 +362,8 @@ public final class DataTypeExtractor {
         // early and helpful exception for common mistakes
         checkForCommonErrors(type);
 
-        // PREDEFINED
-        resultDataType = extractPredefinedType(template, type);
+        // PREDEFINED or DESCRIPTOR
+        resultDataType = extractPredefinedOrDescriptorType(template, type);
         if (resultDataType != null) {
             return resultDataType;
         }
@@ -449,7 +476,8 @@ public final class DataTypeExtractor {
         }
     }
 
-    private @Nullable DataType extractPredefinedType(DataTypeTemplate template, Type type) {
+    private @Nullable DataType extractPredefinedOrDescriptorType(
+            DataTypeTemplate template, Type type) {
         final Class<?> clazz = toClass(type);
         // all predefined types are representable as classes
         if (clazz == null) {

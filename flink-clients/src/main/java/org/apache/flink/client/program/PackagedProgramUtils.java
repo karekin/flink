@@ -23,6 +23,7 @@ import org.apache.flink.api.dag.Pipeline;
 import org.apache.flink.client.FlinkPipelineTranslationUtil;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 
 import org.apache.commons.collections.CollectionUtils;
@@ -52,6 +53,9 @@ import static org.apache.flink.util.Preconditions.checkState;
 /** Utility class for {@link PackagedProgram} related operations. */
 public enum PackagedProgramUtils {
     ;
+
+    private static final String SQL_DRIVER_CLASS_NAME =
+            "org.apache.flink.table.runtime.application.SqlDriver";
 
     private static final String PYTHON_GATEWAY_CLASS_NAME =
             "org.apache.flink.client.python.PythonGatewayServer";
@@ -193,41 +197,19 @@ public enum PackagedProgramUtils {
     }
 
     public static URL getPythonJar() {
-        String flinkOptPath = System.getenv(ConfigConstants.ENV_FLINK_OPT_DIR);
-        final List<Path> pythonJarPath = new ArrayList<>();
-        try {
-            Files.walkFileTree(
-                    FileSystems.getDefault().getPath(flinkOptPath),
-                    new SimpleFileVisitor<Path>() {
-                        @Override
-                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
-                                throws IOException {
-                            FileVisitResult result = super.visitFile(file, attrs);
-                            if (file.getFileName().toString().startsWith("flink-python")) {
-                                pythonJarPath.add(file);
-                            }
-                            return result;
-                        }
-                    });
-        } catch (IOException e) {
-            throw new RuntimeException(
-                    "Exception encountered during finding the flink-python jar. This should not happen.",
-                    e);
-        }
-
-        if (pythonJarPath.size() != 1) {
-            throw new RuntimeException("Found " + pythonJarPath.size() + " flink-python jar.");
-        }
-
-        try {
-            return pythonJarPath.get(0).toUri().toURL();
-        } catch (MalformedURLException e) {
-            throw new RuntimeException("URL is invalid. This should not happen.", e);
-        }
+        return getOptJar("flink-python");
     }
 
     public static String getPythonDriverClassName() {
         return PYTHON_DRIVER_CLASS_NAME;
+    }
+
+    public static boolean isSqlApplication(String entryPointClassName) {
+        return (entryPointClassName != null) && (entryPointClassName.equals(SQL_DRIVER_CLASS_NAME));
+    }
+
+    public static URL getSqlGatewayJar() {
+        return getOptJar("flink-sql-gateway");
     }
 
     public static URI resolveURI(String path) throws URISyntaxException {
@@ -236,6 +218,10 @@ public enum PackagedProgramUtils {
             return uri;
         }
         return new File(path).getAbsoluteFile().toURI();
+    }
+
+    public static boolean usingSystemClassPath(Configuration configuration) {
+        return configuration.get(PipelineOptions.JARS) == null;
     }
 
     private static ProgramInvocationException generateException(
@@ -259,5 +245,40 @@ public enum PackagedProgramUtils {
                         stdout.length() == 0 ? "(none)" : stdout,
                         stderr.length() == 0 ? "(none)" : stderr),
                 cause);
+    }
+
+    private static URL getOptJar(String jarName) {
+        String flinkOptPath = System.getenv(ConfigConstants.ENV_FLINK_OPT_DIR);
+        final List<Path> optJarPath = new ArrayList<>();
+        try {
+            Files.walkFileTree(
+                    FileSystems.getDefault().getPath(flinkOptPath),
+                    new SimpleFileVisitor<Path>() {
+                        @Override
+                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+                                throws IOException {
+                            FileVisitResult result = super.visitFile(file, attrs);
+                            if (file.getFileName().toString().startsWith(jarName)) {
+                                optJarPath.add(file);
+                            }
+                            return result;
+                        }
+                    });
+        } catch (IOException e) {
+            throw new RuntimeException(
+                    "Exception encountered during finding the flink-python jar. This should not happen.",
+                    e);
+        }
+
+        if (optJarPath.size() != 1) {
+            throw new RuntimeException(
+                    String.format("Found " + optJarPath.size() + " %s jar.", jarName));
+        }
+
+        try {
+            return optJarPath.get(0).toUri().toURL();
+        } catch (MalformedURLException e) {
+            throw new RuntimeException("URL is invalid. This should not happen.", e);
+        }
     }
 }

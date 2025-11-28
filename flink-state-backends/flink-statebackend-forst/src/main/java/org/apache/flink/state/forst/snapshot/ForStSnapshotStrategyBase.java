@@ -28,15 +28,11 @@ import org.apache.flink.runtime.checkpoint.filemerging.FileMergingSnapshotManage
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointStreamWithResultProvider;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
-import org.apache.flink.runtime.state.DirectoryStateHandle;
-import org.apache.flink.runtime.state.IncrementalKeyedStateHandle;
 import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
-import org.apache.flink.runtime.state.IncrementalLocalKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedBackendSerializationProxy;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PlaceholderStreamStateHandle;
-import org.apache.flink.runtime.state.SnapshotDirectory;
 import org.apache.flink.runtime.state.SnapshotResources;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.SnapshotStrategy;
@@ -64,6 +60,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.SortedMap;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -194,28 +191,6 @@ public abstract class ForStSnapshotStrategyBase<K, R extends SnapshotResources>
     @Override
     public abstract void close();
 
-    protected void cleanupIncompleteSnapshot(
-            @Nonnull CloseableRegistry tmpResourcesRegistry,
-            @Nonnull SnapshotDirectory localBackupDirectory) {
-        try {
-            tmpResourcesRegistry.close();
-        } catch (Exception e) {
-            LOG.warn("Could not properly clean tmp resources.", e);
-        }
-
-        if (localBackupDirectory.isSnapshotCompleted()) {
-            try {
-                DirectoryStateHandle directoryStateHandle =
-                        localBackupDirectory.completeSnapshotAndGetHandle();
-                if (directoryStateHandle != null) {
-                    directoryStateHandle.discardState();
-                }
-            } catch (Exception e) {
-                LOG.warn("Could not properly discard local state.", e);
-            }
-        }
-    }
-
     /** Common operation in native ForSt snapshot result supplier. */
     protected abstract class ForStSnapshotOperation
             implements SnapshotResultSupplier<KeyedStateHandle> {
@@ -229,27 +204,6 @@ public abstract class ForStSnapshotStrategyBase<K, R extends SnapshotResources>
             this.checkpointId = checkpointId;
             this.checkpointStreamFactory = checkpointStreamFactory;
             this.tmpResourcesRegistry = new CloseableRegistry();
-        }
-
-        protected Optional<KeyedStateHandle> getLocalSnapshot(
-                SnapshotDirectory localBackupDirectory,
-                @Nullable StreamStateHandle localStreamStateHandle,
-                List<IncrementalKeyedStateHandle.HandleAndLocalPath> sharedState)
-                throws IOException {
-            final DirectoryStateHandle directoryStateHandle =
-                    localBackupDirectory.completeSnapshotAndGetHandle();
-            if (directoryStateHandle != null && localStreamStateHandle != null) {
-                return Optional.of(
-                        new IncrementalLocalKeyedStateHandle(
-                                backendUID,
-                                checkpointId,
-                                directoryStateHandle,
-                                keyGroupRange,
-                                localStreamStateHandle,
-                                sharedState));
-            } else {
-                return Optional.empty();
-            }
         }
     }
 
@@ -301,59 +255,95 @@ public abstract class ForStSnapshotStrategyBase<K, R extends SnapshotResources>
         }
     }
 
-    /** A {@link SnapshotResources} for forst sync snapshot. */
-    protected static class ForStSyncSnapshotResources implements SnapshotResources {
-        @Nonnull protected final SnapshotDirectory snapshotDirectory;
-
-        @Nonnull protected final PreviousSnapshot previousSnapshot;
-
-        @Nonnull protected final List<StateMetaInfoSnapshot> stateMetaInfoSnapshots;
-
-        public ForStSyncSnapshotResources(
-                SnapshotDirectory snapshotDirectory,
-                PreviousSnapshot previousSnapshot,
-                List<StateMetaInfoSnapshot> stateMetaInfoSnapshots) {
-            this.snapshotDirectory = snapshotDirectory;
-            this.previousSnapshot = previousSnapshot;
-            this.stateMetaInfoSnapshots = stateMetaInfoSnapshots;
-        }
-
-        @Override
-        public void release() {
-            try {
-                if (snapshotDirectory.exists()) {
-                    LOG.trace(
-                            "Running cleanup for local RocksDB backup directory {}.",
-                            snapshotDirectory);
-                    boolean cleanupOk = snapshotDirectory.cleanup();
-
-                    if (!cleanupOk) {
-                        LOG.debug("Could not properly cleanup local RocksDB backup directory.");
-                    }
-                }
-            } catch (IOException e) {
-                LOG.warn("Could not properly cleanup local RocksDB backup directory.", e);
-            }
-        }
-    }
-
     protected static final PreviousSnapshot EMPTY_PREVIOUS_SNAPSHOT =
-            new PreviousSnapshot(Collections.emptyList());
+            new PreviousSnapshot(null, -1L);
 
     /** Previous snapshot with uploaded sst files. */
     protected static class PreviousSnapshot {
 
         @Nonnull private final Map<String, StreamStateHandle> confirmedSstFiles;
 
-        protected PreviousSnapshot(@Nullable Collection<HandleAndLocalPath> confirmedSstFiles) {
+        /**
+         * Constructor of PreviousSnapshot. Giving a map of uploaded sst files in previous
+         * checkpoints, prune the sst files which have been re-uploaded in the following
+         * checkpoints. The prune logic is used to resolve the mismatch between TM and JM due to
+         * notification delay. Following steps for example:
+         *
+         * <ul>
+         *   <li>1) checkpoint 1 uses file 00001.SST uploaded as xxx.sst.
+         *   <li>2) checkpoint 2 uses the same file 00001.SST but re-uploads it as yyy.sst because
+         *       CP 1 wasn't yet confirmed.
+         *   <li>3) TM get a confirmation of checkpoint 1.
+         *   <li>4) JM completes checkpoint 2 and subsumes checkpoint 1 - removing xxx.sst.
+         *   <li>5) checkpoint 3 tries to re-use file 00001.SST uploaded as xxx.sst in checkpoint 1,
+         *       but it was deleted in (4) by JM.
+         * </ul>
+         *
+         * @param currentUploadedSstFiles the sst files uploaded in previous checkpoints.
+         * @param lastCompletedCheckpoint the last completed checkpoint id.
+         */
+        protected PreviousSnapshot(
+                @Nullable SortedMap<Long, Collection<HandleAndLocalPath>> currentUploadedSstFiles,
+                long lastCompletedCheckpoint) {
             this.confirmedSstFiles =
-                    confirmedSstFiles != null
-                            ? confirmedSstFiles.stream()
+                    currentUploadedSstFiles != null
+                            ? pruneFirstCheckpointSstFiles(
+                                    currentUploadedSstFiles, lastCompletedCheckpoint)
+                            : Collections.emptyMap();
+        }
+
+        /**
+         * The last completed checkpoint's uploaded sst files are all included, then for each
+         * following checkpoint, if a sst file has been re-uploaded, remove it from the first
+         * checkpoint's sst files.
+         *
+         * @param currentUploadedSstFiles the sst files uploaded in the following checkpoint.
+         * @param lastCompletedCheckpoint the last completed checkpoint id.
+         */
+        private Map<String, StreamStateHandle> pruneFirstCheckpointSstFiles(
+                @Nonnull SortedMap<Long, Collection<HandleAndLocalPath>> currentUploadedSstFiles,
+                long lastCompletedCheckpoint) {
+            Map<String, StreamStateHandle> prunedSstFiles = null;
+            int removedCount = 0;
+            for (Map.Entry<Long, Collection<HandleAndLocalPath>> entry :
+                    currentUploadedSstFiles.entrySet()) {
+                // Iterate checkpoints in ascending order of checkpoint id.
+                if (entry.getKey() == lastCompletedCheckpoint) {
+                    // The first checkpoint's uploaded sst files are all included.
+                    prunedSstFiles =
+                            entry.getValue().stream()
                                     .collect(
                                             Collectors.toMap(
                                                     HandleAndLocalPath::getLocalPath,
-                                                    HandleAndLocalPath::getHandle))
-                            : Collections.emptyMap();
+                                                    HandleAndLocalPath::getHandle));
+                } else if (prunedSstFiles == null) {
+                    // The last completed checkpoint's uploaded sst files are not existed.
+                    // So we skip the pruning process.
+                    break;
+                } else if (!prunedSstFiles.isEmpty()) {
+                    // Prune sst files which have been re-uploaded in the following checkpoints.
+                    for (HandleAndLocalPath handleAndLocalPath : entry.getValue()) {
+                        if (!(handleAndLocalPath.getHandle()
+                                instanceof PlaceholderStreamStateHandle)) {
+                            // If it's not a placeholder handle, it means the sst file has been
+                            // re-uploaded in the following checkpoint.
+                            if (prunedSstFiles.remove(handleAndLocalPath.getLocalPath()) != null) {
+                                removedCount++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (removedCount > 0 && LOG.isTraceEnabled()) {
+                LOG.trace(
+                        "Removed {} re-uploaded sst files from base file set for incremental "
+                                + "checkpoint. Base checkpoint id: {}",
+                        removedCount,
+                        currentUploadedSstFiles.firstKey());
+            }
+            return (prunedSstFiles != null && !prunedSstFiles.isEmpty())
+                    ? Collections.unmodifiableMap(prunedSstFiles)
+                    : Collections.emptyMap();
         }
 
         protected Optional<StreamStateHandle> getUploaded(String filename) {
@@ -372,6 +362,15 @@ public abstract class ForStSnapshotStrategyBase<K, R extends SnapshotResources>
                 // (by TM) if the previous checkpoint failed. See FLINK-25395
                 return Optional.empty();
             }
+        }
+
+        protected boolean isEmpty() {
+            return confirmedSstFiles.isEmpty();
+        }
+
+        @Override
+        public String toString() {
+            return "PreviousSnapshot{" + "confirmedSstFiles=" + confirmedSstFiles + '}';
         }
     }
 }

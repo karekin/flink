@@ -18,96 +18,25 @@
 
 package org.apache.flink.table.planner.utils;
 
+import org.apache.flink.sql.parser.SqlParseUtils;
 import org.apache.flink.sql.parser.ddl.SqlDistribution;
-import org.apache.flink.sql.parser.ddl.SqlTableColumn;
-import org.apache.flink.sql.parser.ddl.SqlTableOption;
-import org.apache.flink.table.catalog.Column;
-import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.catalog.TableDistribution;
+import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 
-import org.apache.calcite.sql.SqlCharStringLiteral;
-import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlNumericLiteral;
-
-import javax.annotation.Nullable;
+import org.apache.calcite.sql.dialect.CalciteSqlDialect;
+import org.apache.calcite.sql.parser.SqlParser;
 
 import java.math.BigDecimal;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.stream.Collectors;
 
 /** Utils methods for converting sql to operations. */
 public class OperationConverterUtils {
 
     private OperationConverterUtils() {}
-
-    public static List<TableChange> buildModifyColumnChange(
-            Column oldColumn,
-            Column newColumn,
-            @Nullable TableChange.ColumnPosition columnPosition) {
-        if (oldColumn.isPhysical() && newColumn.isPhysical()) {
-            List<TableChange> changes = new ArrayList<>();
-            String newComment = newColumn.getComment().orElse(oldColumn.getComment().orElse(null));
-            if (!newColumn.getComment().equals(oldColumn.getComment())) {
-                changes.add(TableChange.modifyColumnComment(oldColumn, newComment));
-            }
-
-            if (!oldColumn
-                    .getDataType()
-                    .getLogicalType()
-                    .equals(newColumn.getDataType().getLogicalType())) {
-                changes.add(
-                        TableChange.modifyPhysicalColumnType(
-                                oldColumn.withComment(newComment), newColumn.getDataType()));
-            }
-
-            if (!Objects.equals(newColumn.getName(), oldColumn.getName())) {
-                changes.add(
-                        TableChange.modifyColumnName(
-                                oldColumn.withComment(newComment).copy(newColumn.getDataType()),
-                                newColumn.getName()));
-            }
-
-            if (columnPosition != null) {
-                changes.add(TableChange.modifyColumnPosition(newColumn, columnPosition));
-            }
-
-            return changes;
-        } else {
-            return Collections.singletonList(
-                    TableChange.modify(oldColumn, newColumn, columnPosition));
-        }
-    }
-
-    public static @Nullable String getComment(SqlTableColumn column) {
-        return column.getComment()
-                .map(SqlCharStringLiteral.class::cast)
-                .map(c -> c.getValueAs(String.class))
-                .orElse(null);
-    }
-
-    public static @Nullable String getTableComment(Optional<SqlCharStringLiteral> tableComment) {
-        return tableComment.map(comment -> comment.getValueAs(String.class)).orElse(null);
-    }
-
-    public static Map<String, String> extractProperties(SqlNodeList propList) {
-        Map<String, String> properties = new HashMap<>();
-        if (propList != null) {
-            propList.getList()
-                    .forEach(
-                            p ->
-                                    properties.put(
-                                            ((SqlTableOption) p).getKeyString(),
-                                            ((SqlTableOption) p).getValueString()));
-        }
-        return properties;
-    }
 
     public static TableDistribution getDistributionFromSqlDistribution(
             SqlDistribution distribution) {
@@ -122,15 +51,20 @@ public class OperationConverterUtils {
             bucketCount = ((BigDecimal) (count).getValue()).intValue();
         }
 
-        List<String> bucketColumns = Collections.emptyList();
-
         SqlNodeList columns = distribution.getBucketColumns();
-        if (columns != null) {
-            bucketColumns =
-                    columns.getList().stream()
-                            .map(p -> ((SqlIdentifier) p).getSimple())
-                            .collect(Collectors.toList());
-        }
+        List<String> bucketColumns = SqlParseUtils.extractList(columns);
         return TableDistribution.of(kind, bucketCount, bucketColumns);
+    }
+
+    public static String getQuotedSqlString(SqlNode sqlNode, FlinkPlannerImpl flinkPlanner) {
+        SqlParser.Config parserConfig = flinkPlanner.config().getParserConfig();
+        SqlDialect dialect =
+                new CalciteSqlDialect(
+                        SqlDialect.EMPTY_CONTEXT
+                                .withQuotedCasing(parserConfig.unquotedCasing())
+                                .withConformance(parserConfig.conformance())
+                                .withUnquotedCasing(parserConfig.unquotedCasing())
+                                .withIdentifierQuoteString(parserConfig.quoting().string));
+        return sqlNode.toSqlString(dialect).getSql();
     }
 }

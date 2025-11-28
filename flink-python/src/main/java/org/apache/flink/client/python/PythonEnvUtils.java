@@ -20,6 +20,7 @@ package org.apache.flink.client.python;
 
 import org.apache.flink.client.deployment.application.UnsuccessfulExecutionException;
 import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.python.util.PythonDependencyUtils;
@@ -31,7 +32,7 @@ import org.apache.flink.util.OperatingSystem;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StringUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.base.Strings;
+import org.apache.flink.shaded.guava33.com.google.common.base.Strings;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -368,10 +369,9 @@ final class PythonEnvUtils {
             // set the child process the output same as the parent process.
             pythonProcessBuilder.redirectOutput(ProcessBuilder.Redirect.INHERIT);
         }
-
         LOG.info(
                 "Starting Python process with environment variables: {{}}, command: {}",
-                env.entrySet().stream()
+                ConfigurationUtils.hideSensitiveValues(env).entrySet().stream()
                         .map(e -> e.getKey() + "=" + e.getValue())
                         .collect(Collectors.joining(", ")),
                 String.join(" ", commands));

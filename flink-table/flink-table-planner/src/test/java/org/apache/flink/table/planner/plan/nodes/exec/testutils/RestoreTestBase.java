@@ -32,10 +32,12 @@ import org.apache.flink.table.api.PlanReference;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.planner.factories.TestValuesModelFactory;
 import org.apache.flink.table.planner.factories.TestValuesTableFactory;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.utils.ExecNodeMetadataUtil;
+import org.apache.flink.table.test.program.ModelTestStep;
 import org.apache.flink.table.test.program.SinkTestStep;
 import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.SqlTestStep;
@@ -79,9 +81,18 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Base class for implementing restore tests for {@link ExecNode}.You can generate json compiled
- * plan and a savepoint for the latest node version by running {@link
- * RestoreTestBase#generateTestSetupFiles(TableTestProgram)} which is disabled by default.
+ * Base class for implementing restore tests for {@link ExecNode}.
+ *
+ * <p>Restore tests test {@link TableTestProgram}s in two steps: The first step creates and executes
+ * a {@link CompiledPlan} with "before restore" data which generates state that is persisted using a
+ * savepoint. In the second step, the program is restored from the {@link CompiledPlan} and the
+ * corresponding savepoint. "After restore" data is ingested to test the final correctness.
+ *
+ * <p>You can generate a JSON compiled plan and a savepoint for the latest node version by running
+ * {@link RestoreTestBase#generateTestSetupFiles(TableTestProgram)} which is disabled by default.
+ * The "before restore" data of a sink defines the condition when a stop-with-savepoint should be
+ * triggered. You can inspect {@link #registerSinkObserver(List, SinkTestStep, boolean)} to monitor
+ * the savepoint progress.
  *
  * <p><b>Note:</b> The test base uses {@link TableConfigOptions.CatalogPlanCompilation#SCHEMA}
  * because it needs to adjust source and sink properties before and after the restore. Therefore,
@@ -149,6 +160,7 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                 TestKind.CONFIG,
                 TestKind.FUNCTION,
                 TestKind.TEMPORAL_FUNCTION,
+                TestKind.MODEL,
                 TestKind.SOURCE_WITH_RESTORE_DATA,
                 TestKind.SOURCE_WITH_DATA,
                 TestKind.SINK_WITH_RESTORE_DATA,
@@ -227,14 +239,14 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         TestValuesTableFactory.registerLocalRawResultsObserver(
                 tableName,
                 (integer, strings) -> {
-                    List<String> results =
+                    final List<String> expected =
                             new ArrayList<>(sinkTestStep.getExpectedBeforeRestoreAsStrings());
                     if (!ignoreAfter) {
-                        results.addAll(sinkTestStep.getExpectedAfterRestoreAsStrings());
+                        expected.addAll(sinkTestStep.getExpectedAfterRestoreAsStrings());
                     }
-                    List<String> expectedResults = getExpectedResults(sinkTestStep, tableName);
+                    final List<String> actual = getActualResults(sinkTestStep, tableName);
                     final boolean shouldComplete =
-                            CollectionUtils.isEqualCollection(expectedResults, results);
+                            CollectionUtils.isEqualCollection(actual, expected);
                     if (shouldComplete) {
                         future.complete(null);
                     }
@@ -267,6 +279,13 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
             options.put("terminating", "false");
             options.put("runtime-source", "NewSource");
             sourceTestStep.apply(tEnv, options);
+        }
+
+        for (ModelTestStep modelTestStep : program.getSetupModelTestSteps()) {
+            final Map<String, String> options = new HashMap<>();
+            options.put("provider", "values");
+            options.put("data-id", TestValuesModelFactory.registerData(modelTestStep.data));
+            modelTestStep.apply(tEnv, options);
         }
 
         final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -336,7 +355,17 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                     afterRestoreSource == AfterRestoreSource.NO_RESTORE
                             ? sourceTestStep.dataBeforeRestore
                             : sourceTestStep.dataAfterRestore;
+
             final String id = TestValuesTableFactory.registerData(data);
+
+            if (sourceTestStep.treatDataBeforeRestoreAsConsumedData) {
+                final Collection<Row> consumedData =
+                        afterRestoreSource == AfterRestoreSource.NO_RESTORE
+                                ? Collections.emptyList()
+                                : sourceTestStep.dataBeforeRestore;
+                TestValuesTableFactory.registerConsumedData(consumedData, id);
+            }
+
             final Map<String, String> options = new HashMap<>();
             options.put("connector", "values");
             options.put("data-id", id);
@@ -345,6 +374,13 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                 options.put("terminating", "false");
             }
             sourceTestStep.apply(tEnv, options);
+        }
+
+        for (ModelTestStep modelTestStep : program.getSetupModelTestSteps()) {
+            final Map<String, String> options = new HashMap<>();
+            options.put("provider", "values");
+            options.put("data-id", TestValuesModelFactory.registerData(modelTestStep.data));
+            modelTestStep.apply(tEnv, options);
         }
 
         final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -363,7 +399,10 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         program.getSetupFunctionTestSteps().forEach(s -> s.apply(tEnv));
         program.getSetupTemporalFunctionTestSteps().forEach(s -> s.apply(tEnv));
 
-        final CompiledPlan compiledPlan = tEnv.loadPlan(PlanReference.fromFile(planPath));
+        final byte[] compiledPlanAsSmileBytes =
+                tEnv.loadPlan(PlanReference.fromFile(planPath)).asSmileBytes();
+        final CompiledPlan compiledPlan =
+                tEnv.loadPlan(PlanReference.fromSmileBytes(compiledPlanAsSmileBytes));
 
         if (afterRestoreSource == AfterRestoreSource.INFINITE) {
             final TableResult tableResult = compiledPlan.execute();
@@ -372,17 +411,11 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         } else {
             compiledPlan.execute().await();
             for (SinkTestStep sinkTestStep : program.getSetupSinkTestSteps()) {
-                List<String> expectedResults = getExpectedResults(sinkTestStep, sinkTestStep.name);
-                assertThat(expectedResults)
+                List<String> actualResults = getActualResults(sinkTestStep, sinkTestStep.name);
+                assertThat(actualResults)
+                        .as("%s", program.id)
                         .containsExactlyInAnyOrder(
-                                Stream.concat(
-                                                sinkTestStep
-                                                        .getExpectedBeforeRestoreAsStrings()
-                                                        .stream(),
-                                                sinkTestStep
-                                                        .getExpectedAfterRestoreAsStrings()
-                                                        .stream())
-                                        .toArray(String[]::new));
+                                sinkTestStep.getExpectedAsStrings().toArray(new String[0]));
             }
         }
     }
@@ -398,7 +431,7 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                 System.getProperty("user.dir"), metadata.name(), metadata.version(), program.id);
     }
 
-    private static List<String> getExpectedResults(SinkTestStep sinkTestStep, String tableName) {
+    private static List<String> getActualResults(SinkTestStep sinkTestStep, String tableName) {
         if (sinkTestStep.shouldTestChangelogData()) {
             return TestValuesTableFactory.getRawResultsAsStrings(tableName);
         } else {

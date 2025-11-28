@@ -509,7 +509,73 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
   "properties" : {
     "plan" : {
       "type" : "object",
-      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan",
+      "properties" : {
+        "jid" : {
+          "type" : "string"
+        },
+        "name" : {
+          "type" : "string"
+        },
+        "nodes" : {
+          "type" : "array",
+          "items" : {
+            "type" : "object",
+            "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node",
+            "properties" : {
+              "description" : {
+                "type" : "string"
+              },
+              "id" : {
+                "type" : "string"
+              },
+              "inputs" : {
+                "type" : "array",
+                "items" : {
+                  "type" : "object",
+                  "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node:Input",
+                  "properties" : {
+                    "caching" : {
+                      "type" : "string"
+                    },
+                    "exchange" : {
+                      "type" : "string"
+                    },
+                    "id" : {
+                      "type" : "string"
+                    },
+                    "local_strategy" : {
+                      "type" : "string"
+                    },
+                    "num" : {
+                      "type" : "integer"
+                    },
+                    "ship_strategy" : {
+                      "type" : "string"
+                    }
+                  }
+                }
+              },
+              "operator" : {
+                "type" : "string"
+              },
+              "operator_strategy" : {
+                "type" : "string"
+              },
+              "optimizer_properties" : {
+                "type" : "object",
+                "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+              },
+              "parallelism" : {
+                "type" : "integer"
+              }
+            }
+          }
+        },
+        "type" : {
+          "type" : "string"
+        }
+      }
     }
   }
 }</code></pre>
@@ -1030,6 +1096,9 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
           "name" : {
             "type" : "string"
           },
+          "pending-operators" : {
+            "type" : "integer"
+          },
           "start-time" : {
             "type" : "integer"
           },
@@ -1118,9 +1187,78 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
     "now" : {
       "type" : "integer"
     },
+    "pending-operators" : {
+      "type" : "integer"
+    },
     "plan" : {
       "type" : "object",
-      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan",
+      "properties" : {
+        "jid" : {
+          "type" : "string"
+        },
+        "name" : {
+          "type" : "string"
+        },
+        "nodes" : {
+          "type" : "array",
+          "items" : {
+            "type" : "object",
+            "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node",
+            "properties" : {
+              "description" : {
+                "type" : "string"
+              },
+              "id" : {
+                "type" : "string"
+              },
+              "inputs" : {
+                "type" : "array",
+                "items" : {
+                  "type" : "object",
+                  "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node:Input",
+                  "properties" : {
+                    "caching" : {
+                      "type" : "string"
+                    },
+                    "exchange" : {
+                      "type" : "string"
+                    },
+                    "id" : {
+                      "type" : "string"
+                    },
+                    "local_strategy" : {
+                      "type" : "string"
+                    },
+                    "num" : {
+                      "type" : "integer"
+                    },
+                    "ship_strategy" : {
+                      "type" : "string"
+                    }
+                  }
+                }
+              },
+              "operator" : {
+                "type" : "string"
+              },
+              "operator_strategy" : {
+                "type" : "string"
+              },
+              "optimizer_properties" : {
+                "type" : "object",
+                "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+              },
+              "parallelism" : {
+                "type" : "integer"
+              }
+            }
+          }
+        },
+        "type" : {
+          "type" : "string"
+        }
+      }
     },
     "start-time" : {
       "type" : "integer"
@@ -1134,6 +1272,10 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
       "additionalProperties" : {
         "type" : "integer"
       }
+    },
+    "stream-graph" : {
+      "type" : "object",
+      "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
     },
     "timestamps" : {
       "type" : "object",
@@ -1696,11 +1838,11 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
       "properties" : {
         "alignment_buffered" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "checkpointed_size" : {
           "type" : "object",
-          "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto",
+          "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto",
           "properties" : {
             "avg" : {
               "type" : "integer"
@@ -1730,19 +1872,19 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
         },
         "end_to_end_duration" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "persisted_data" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "processed_data" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "state_size" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         }
       }
     }
@@ -2155,19 +2297,19 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
           "properties" : {
             "buffered" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             },
             "duration" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             },
             "persisted" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             },
             "processed" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             }
           }
         },
@@ -2177,17 +2319,17 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
           "properties" : {
             "async" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             },
             "sync" : {
               "type" : "object",
-              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+              "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
             }
           }
         },
         "checkpointed_size" : {
           "type" : "object",
-          "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto",
+          "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto",
           "properties" : {
             "avg" : {
               "type" : "integer"
@@ -2217,15 +2359,15 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
         },
         "end_to_end_duration" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "start_delay" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         },
         "state_size" : {
           "type" : "object",
-          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:checkpoints:StatsSummaryDto"
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:util.stats:StatsSummaryDto"
         }
       }
     }
@@ -2869,7 +3011,73 @@ Using 'curl' you can upload a jar via 'curl -X POST -H "Expect:" -F "jarfile=@pa
   "properties" : {
     "plan" : {
       "type" : "object",
-      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+      "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan",
+      "properties" : {
+        "jid" : {
+          "type" : "string"
+        },
+        "name" : {
+          "type" : "string"
+        },
+        "nodes" : {
+          "type" : "array",
+          "items" : {
+            "type" : "object",
+            "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node",
+            "properties" : {
+              "description" : {
+                "type" : "string"
+              },
+              "id" : {
+                "type" : "string"
+              },
+              "inputs" : {
+                "type" : "array",
+                "items" : {
+                  "type" : "object",
+                  "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:Plan:Node:Input",
+                  "properties" : {
+                    "caching" : {
+                      "type" : "string"
+                    },
+                    "exchange" : {
+                      "type" : "string"
+                    },
+                    "id" : {
+                      "type" : "string"
+                    },
+                    "local_strategy" : {
+                      "type" : "string"
+                    },
+                    "num" : {
+                      "type" : "integer"
+                    },
+                    "ship_strategy" : {
+                      "type" : "string"
+                    }
+                  }
+                }
+              },
+              "operator" : {
+                "type" : "string"
+              },
+              "operator_strategy" : {
+                "type" : "string"
+              },
+              "optimizer_properties" : {
+                "type" : "object",
+                "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+              },
+              "parallelism" : {
+                "type" : "integer"
+              }
+            }
+          }
+        },
+        "type" : {
+          "type" : "string"
+        }
+      }
     }
   }
 }</code></pre>

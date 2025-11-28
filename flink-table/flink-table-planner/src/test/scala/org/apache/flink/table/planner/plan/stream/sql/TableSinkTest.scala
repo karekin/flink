@@ -208,6 +208,30 @@ class TableSinkTest extends TableTestBase {
   }
 
   @Test
+  def testRetractSinkWithPrimaryKey(): Unit = {
+    util.addTable(s"""
+                     |CREATE TABLE retractSink (
+                     |  `cnt` BIGINT,
+                     |  `a` BIGINT,
+                     |  PRIMARY KEY (a) NOT ENFORCED
+                     |) WITH (
+                     |  'connector' = 'values',
+                     |  'sink-changelog-mode-enforced' = 'I,UB,UA,D'
+                     |)
+                     |""".stripMargin)
+    val dml =
+      """
+        |INSERT INTO retractSink
+        |SELECT cnt, COUNT(a) AS a FROM (
+        |    SELECT a, COUNT(*) AS cnt FROM MyTable GROUP BY a) t
+        |GROUP BY cnt
+      """.stripMargin
+    val stmtSet = util.tableEnv.createStatementSet()
+    stmtSet.addInsertSql(dml)
+    util.verifyRelPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
   def testUpsertSink(): Unit = {
     util.addTable(s"""
                      |CREATE TABLE upsertSink (
@@ -740,45 +764,6 @@ class TableSinkTest extends TableTestBase {
                             |  from source
                             |) where rn=1""".stripMargin)
     util.verifyExplain(stmtSet, ExplainDetail.JSON_EXECUTION_PLAN)
-  }
-
-  @Test
-  def testManagedTableSinkWithDisableCheckpointing(): Unit = {
-    util.addTable(s"""
-                     |CREATE TABLE sink (
-                     |  `a` INT,
-                     |  `b` BIGINT,
-                     |  `c` STRING
-                     |) WITH(
-                     |)
-                     |""".stripMargin)
-    val stmtSet = util.tableEnv.createStatementSet()
-    stmtSet.addInsertSql("INSERT INTO sink SELECT * FROM MyTable")
-
-    assertThatThrownBy(() => util.verifyAstPlan(stmtSet, ExplainDetail.CHANGELOG_MODE))
-      .hasMessageContaining(
-        s"You should enable the checkpointing for sinking to managed table " +
-          s"'default_catalog.default_database.sink', " +
-          s"managed table relies on checkpoint to commit and " +
-          s"the data is visible only after commit.")
-      .isInstanceOf[TableException]
-  }
-
-  @Test
-  def testManagedTableSinkWithEnableCheckpointing(): Unit = {
-    util.getStreamEnv.enableCheckpointing(10)
-    util.addTable(s"""
-                     |CREATE TABLE sink (
-                     |  `a` INT,
-                     |  `b` BIGINT,
-                     |  `c` STRING
-                     |) WITH(
-                     |)
-                     |""".stripMargin)
-    val stmtSet = util.tableEnv.createStatementSet()
-    stmtSet.addInsertSql("INSERT INTO sink SELECT * FROM MyTable")
-
-    util.verifyAstPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
   }
 
   @Test

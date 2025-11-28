@@ -29,28 +29,31 @@ import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogDatabaseImpl;
 import org.apache.flink.table.catalog.CatalogFunction;
 import org.apache.flink.table.catalog.CatalogFunctionImpl;
+import org.apache.flink.table.catalog.CatalogMaterializedTable;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.LogicalRefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshStatus;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.Column;
-import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.FunctionLanguage;
 import org.apache.flink.table.catalog.GenericInMemoryCatalog;
+import org.apache.flink.table.catalog.IntervalFreshness;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.catalog.TableDistribution;
+import org.apache.flink.table.catalog.TableDistribution.Kind;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
 import org.apache.flink.table.catalog.exceptions.FunctionAlreadyExistException;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.SqlCallExpression;
-import org.apache.flink.table.factories.TestManagedTableFactory;
 import org.apache.flink.table.legacy.api.TableColumn;
 import org.apache.flink.table.legacy.api.TableSchema;
 import org.apache.flink.table.legacy.api.constraints.UniqueConstraint;
 import org.apache.flink.table.operations.CreateTableASOperation;
 import org.apache.flink.table.operations.NopOperation;
 import org.apache.flink.table.operations.Operation;
-import org.apache.flink.table.operations.SinkModifyOperation;
-import org.apache.flink.table.operations.SourceQueryOperation;
 import org.apache.flink.table.operations.ddl.AddPartitionsOperation;
 import org.apache.flink.table.operations.ddl.AlterCatalogCommentOperation;
 import org.apache.flink.table.operations.ddl.AlterCatalogOptionsOperation;
@@ -65,12 +68,15 @@ import org.apache.flink.table.operations.ddl.CreateTempSystemFunctionOperation;
 import org.apache.flink.table.operations.ddl.CreateViewOperation;
 import org.apache.flink.table.operations.ddl.DropDatabaseOperation;
 import org.apache.flink.table.operations.ddl.DropPartitionsOperation;
+import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableChangeOperation;
+import org.apache.flink.table.operations.materializedtable.CreateMaterializedTableOperation;
 import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 import org.apache.flink.table.planner.expressions.utils.Func0$;
 import org.apache.flink.table.planner.expressions.utils.Func1$;
 import org.apache.flink.table.planner.expressions.utils.Func8$;
 import org.apache.flink.table.planner.parse.CalciteParser;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions;
+import org.apache.flink.table.planner.utils.TestSimpleDynamicTableSourceFactory;
 import org.apache.flink.table.resource.ResourceType;
 import org.apache.flink.table.resource.ResourceUri;
 import org.apache.flink.table.types.DataType;
@@ -79,6 +85,9 @@ import org.apache.calcite.sql.SqlNode;
 import org.assertj.core.api.HamcrestCondition;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import javax.annotation.Nullable;
 
@@ -90,8 +99,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.flink.table.api.Expressions.$;
 import static org.apache.flink.table.planner.utils.OperationMatchers.entry;
@@ -105,10 +115,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test cases for the DDL statements for {@link SqlNodeToOperationConversion}. */
-public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
+class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
 
     @Test
-    public void testAlterCatalog() {
+    void testAlterCatalog() {
         // test alter catalog options
         final String sql1 = "ALTER CATALOG cat2 SET ('K1' = 'V1', 'k2' = 'v2', 'k2' = 'v2_new')";
         final Map<String, String> expectedOptions = new HashMap<>();
@@ -163,7 +173,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateDatabase() {
+    void testCreateDatabase() {
         final String[] createDatabaseSqls =
                 new String[] {
                     "create database db1",
@@ -203,7 +213,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testDropDatabase() {
+    void testDropDatabase() {
         final String[] dropDatabaseSqls =
                 new String[] {
                     "drop database db1",
@@ -228,7 +238,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterDatabase() throws Exception {
+    void testAlterDatabase() throws Exception {
         catalogManager.registerCatalog("cat1", new GenericInMemoryCatalog("default", "default"));
         catalogManager.createDatabase(
                 "cat1", "db1", new CatalogDatabaseImpl(new HashMap<>(), "db1_comment"), true);
@@ -249,7 +259,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTable() {
+    void testCreateTable() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a bigint comment 'column a',\n"
@@ -267,7 +277,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
         Operation operation = parse(sql, planner, parser);
         assertThat(operation).isInstanceOf(CreateTableOperation.class);
         CreateTableOperation op = (CreateTableOperation) operation;
-        CatalogTable catalogTable = op.getCatalogTable();
+        ResolvedCatalogTable catalogTable = op.getCatalogTable();
         assertThat(catalogTable.getPartitionKeys()).hasSameElementsAs(Arrays.asList("a", "d"));
         assertThat(catalogTable.getSchema().getFieldNames())
                 .isEqualTo(new String[] {"a", "b", "c", "d"});
@@ -279,9 +289,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                             DataTypes.INT(),
                             DataTypes.VARCHAR(Integer.MAX_VALUE)
                         });
-        assertThat(catalogTable).isInstanceOf(ResolvedCatalogTable.class);
-        ResolvedCatalogTable resolvedCatalogTable = (ResolvedCatalogTable) catalogTable;
-        resolvedCatalogTable
+        catalogTable
                 .getResolvedSchema()
                 .getColumn(0)
                 .ifPresent(
@@ -291,7 +299,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableWithPrimaryKey() {
+    void testCreateTableWithPrimaryKey() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a bigint,\n"
@@ -328,7 +336,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testPrimaryKeyOnGeneratedColumn() {
+    void testPrimaryKeyOnGeneratedColumn() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a bigint not null,\n"
@@ -348,7 +356,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testPrimaryKeyNonExistentColumn() {
+    void testPrimaryKeyNonExistentColumn() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a bigint not null,\n"
@@ -366,7 +374,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableWithMinusInOptionKey() {
+    void testCreateTableWithMinusInOptionKey() {
         final String sql =
                 "create table source_table(\n"
                         + "  a int,\n"
@@ -399,7 +407,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableWithWatermark()
+    void testCreateTableWithWatermark()
             throws FunctionAlreadyExistException, DatabaseNotExistException {
         CatalogFunction cf =
                 new CatalogFunctionImpl(JavaUserDefinedScalarFunctions.JavaFunc5.class.getName());
@@ -422,8 +430,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 SqlNodeToOperationConversion.convert(planner, catalogManager, node).get();
         assertThat(operation).isInstanceOf(CreateTableOperation.class);
         CreateTableOperation op = (CreateTableOperation) operation;
-        CatalogTable catalogTable = op.getCatalogTable();
-        Map<String, String> properties = catalogTable.toProperties();
+        ResolvedCatalogTable catalogTable = op.getCatalogTable();
+        Map<String, String> properties = catalogTable.toProperties(DefaultSqlFactory.INSTANCE);
         Map<String, String> expected = new HashMap<>();
         expected.put("schema.0.name", "a");
         expected.put("schema.0.data-type", "INT");
@@ -441,18 +449,18 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testBasicCreateTableLike() {
+    void testBasicCreateTableLike() {
         Map<String, String> sourceProperties = new HashMap<>();
         sourceProperties.put("format.type", "json");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("f0", DataTypes.INT().notNull())
-                                .column("f1", DataTypes.TIMESTAMP(3))
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        sourceProperties);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("f0", DataTypes.INT().notNull())
+                                        .column("f1", DataTypes.TIMESTAMP(3))
+                                        .build())
+                        .options(sourceProperties)
+                        .build();
 
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
@@ -488,19 +496,19 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableLikeWithFullPath() {
+    void testCreateTableLikeWithFullPath() {
         Map<String, String> sourceProperties = new HashMap<>();
         sourceProperties.put("connector.type", "kafka");
         sourceProperties.put("format.type", "json");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("f0", DataTypes.INT().notNull())
-                                .column("f1", DataTypes.TIMESTAMP(3))
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        sourceProperties);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("f0", DataTypes.INT().notNull())
+                                        .column("f1", DataTypes.TIMESTAMP(3))
+                                        .build())
+                        .options(sourceProperties)
+                        .build();
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
         final String sql = "create table mytable like `builtin`.`default`.sourceTable";
@@ -521,20 +529,21 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testMergingCreateTableLike() {
+    void testMergingCreateTableLike() {
         Map<String, String> sourceProperties = new HashMap<>();
         sourceProperties.put("format.type", "json");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("f0", DataTypes.INT().notNull())
-                                .column("f1", DataTypes.TIMESTAMP(3))
-                                .columnByExpression("f2", "`f0` + 12345")
-                                .watermark("f1", "`f1` - interval '1' second")
-                                .build(),
-                        null,
-                        Arrays.asList("f0", "f1"),
-                        sourceProperties);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("f0", DataTypes.INT().notNull())
+                                        .column("f1", DataTypes.TIMESTAMP(3))
+                                        .columnByExpression("f2", "`f0` + 12345")
+                                        .watermark("f1", "`f1` - interval '1' second")
+                                        .build())
+                        .partitionKeys(Arrays.asList("f0", "f1"))
+                        .options(sourceProperties)
+                        .build();
 
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
@@ -575,7 +584,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testMergingCreateTableLikeExcludingDistribution() {
+    void testMergingCreateTableLikeExcludingDistribution() {
         Map<String, String> sourceProperties = new HashMap<>();
         sourceProperties.put("format.type", "json");
         CatalogTable catalogTable =
@@ -634,7 +643,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableValidDistribution() {
+    void testCreateTableValidDistribution() {
         final String sql =
                 "create table derivedTable(\n" + "  a int\n" + ")\n" + "DISTRIBUTED BY (a)";
         Operation operation = parseAndConvert(sql);
@@ -648,7 +657,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableInvalidDistribution() {
+    void testCreateTableInvalidDistribution() {
         final String sql =
                 "create table derivedTable(\n" + "  a int\n" + ")\n" + "DISTRIBUTED BY (f3)";
 
@@ -659,7 +668,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void tesCreateTableAsWithOrderingColumns() {
+    void testCreateTableAsWithOrderingColumns() {
         CatalogTable catalogTable =
                 CatalogTable.newBuilder()
                         .schema(
@@ -667,6 +676,10 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                         .column("f0", DataTypes.INT().notNull())
                                         .column("f1", DataTypes.TIMESTAMP(3))
                                         .build())
+                        .options(
+                                Map.of(
+                                        "connector",
+                                        TestSimpleDynamicTableSourceFactory.IDENTIFIER()))
                         .build();
 
         catalogManager.createTable(
@@ -689,7 +702,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableInvalidPartition() {
+    void testCreateTableInvalidPartition() {
         final String sql =
                 "create table derivedTable(\n" + "  a int\n" + ")\n" + "PARTITIONED BY (f3)";
 
@@ -700,13 +713,11 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableLikeInvalidPartition() {
+    void testCreateTableLikeInvalidPartition() {
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder().column("f0", DataTypes.INT().notNull()).build(),
-                        null,
-                        Collections.emptyList(),
-                        Collections.emptyMap());
+                CatalogTable.newBuilder()
+                        .schema(Schema.newBuilder().column("f0", DataTypes.INT().notNull()).build())
+                        .build();
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
 
@@ -724,7 +735,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableInvalidWatermark() {
+    void testCreateTableInvalidWatermark() {
         final String sql =
                 "create table derivedTable(\n"
                         + "  a int,\n"
@@ -740,13 +751,11 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableLikeInvalidWatermark() {
+    void testCreateTableLikeInvalidWatermark() {
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder().column("f0", DataTypes.INT().notNull()).build(),
-                        null,
-                        Collections.emptyList(),
-                        Collections.emptyMap());
+                CatalogTable.newBuilder()
+                        .schema(Schema.newBuilder().column("f0", DataTypes.INT().notNull()).build())
+                        .build();
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
 
@@ -766,19 +775,19 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableLikeNestedWatermark() {
+    void testCreateTableLikeNestedWatermark() {
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("f0", DataTypes.INT().notNull())
-                                .column(
-                                        "f1",
-                                        DataTypes.ROW(
-                                                DataTypes.FIELD("tmstmp", DataTypes.TIMESTAMP(3))))
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        Collections.emptyMap());
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("f0", DataTypes.INT().notNull())
+                                        .column(
+                                                "f1",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "tmstmp", DataTypes.TIMESTAMP(3))))
+                                        .build())
+                        .build();
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceTable"), false);
 
@@ -799,7 +808,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test // TODO: tweak the tests when FLINK-13604 is fixed.
-    public void testCreateTableWithFullDataTypes() {
+    void testCreateTableWithFullDataTypes() {
         final List<TestItem> testItems =
                 Arrays.asList(
                         createTestItem("CHAR", DataTypes.CHAR(1)),
@@ -872,17 +881,15 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                         createTestItem(
                                 "MAP<BIGINT, BOOLEAN>",
                                 DataTypes.MAP(DataTypes.BIGINT(), DataTypes.BOOLEAN())),
-                        // Expect to be ROW<`f0` INT NOT NULL, `f1` BOOLEAN>.
                         createTestItem(
                                 "ROW<f0 INT NOT NULL, f1 BOOLEAN>",
                                 DataTypes.ROW(
-                                        DataTypes.FIELD("f0", DataTypes.INT()),
+                                        DataTypes.FIELD("f0", DataTypes.INT().notNull()),
                                         DataTypes.FIELD("f1", DataTypes.BOOLEAN()))),
-                        // Expect to be ROW<`f0` INT NOT NULL, `f1` BOOLEAN>.
                         createTestItem(
                                 "ROW(f0 INT NOT NULL, f1 BOOLEAN)",
                                 DataTypes.ROW(
-                                        DataTypes.FIELD("f0", DataTypes.INT()),
+                                        DataTypes.FIELD("f0", DataTypes.INT().notNull()),
                                         DataTypes.FIELD("f1", DataTypes.BOOLEAN()))),
                         createTestItem(
                                 "ROW<`f0` INT>",
@@ -892,12 +899,11 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                 DataTypes.ROW(DataTypes.FIELD("f0", DataTypes.INT()))),
                         createTestItem("ROW<>", DataTypes.ROW()),
                         createTestItem("ROW()", DataTypes.ROW()),
-                        // Expect to be ROW<`f0` INT NOT NULL '...', `f1` BOOLEAN '...'>.
                         createTestItem(
                                 "ROW<f0 INT NOT NULL 'This is a comment.',"
                                         + " f1 BOOLEAN 'This as well.'>",
                                 DataTypes.ROW(
-                                        DataTypes.FIELD("f0", DataTypes.INT()),
+                                        DataTypes.FIELD("f0", DataTypes.INT().notNull()),
                                         DataTypes.FIELD("f1", DataTypes.BOOLEAN()))),
                         createTestItem(
                                 "ARRAY<ROW<f0 INT, f1 BOOLEAN>>",
@@ -953,7 +959,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableWithComputedColumn() {
+    void testCreateTableWithComputedColumn() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a int,\n"
@@ -1010,7 +1016,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateTableWithMetadataColumn() {
+    void testCreateTableWithMetadataColumn() {
         final String sql =
                 "CREATE TABLE tbl1 (\n"
                         + "  a INT,\n"
@@ -1043,7 +1049,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateFunction() {
+    void testCreateFunction() {
         // test create catalog function
         String sql =
                 "CREATE FUNCTION test_udf AS 'org.apache.fink.function.function1' "
@@ -1079,13 +1085,13 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                         "CREATE TEMPORARY SYSTEM FUNCTION: (functionName: [test_udf2], "
                                 + "catalogFunction: [CatalogFunctionImpl{className='org.apache.fink.function.function2', "
                                 + "functionLanguage='SCALA', "
-                                + "functionResource='[ResourceUri{resourceType=JAR, uri='file:///path/to/test.jar'}]'}], "
+                                + "functionResource='[ResourceUri{resourceType=JAR, uri='file:///path/to/test.jar'}]', options='{}'}], "
                                 + "ignoreIfExists: [false], functionLanguage: [SCALA])");
     }
 
     @Test
-    public void testAlterTable() throws Exception {
-        prepareNonManagedTable(false);
+    void testAlterTable() throws Exception {
+        prepareTable(false);
         final String[] renameTableSqls =
                 new String[] {
                     "alter table cat1.db1.tb1 rename to tb2",
@@ -1144,8 +1150,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableRenameColumn() throws Exception {
-        prepareTable("tb1", false, false, true, 3);
+    void testAlterTableRenameColumn() throws Exception {
+        prepareTable("tb1", false, true, 3);
         // rename pk column c
         Operation operation = parse("alter table tb1 rename c to c1");
         assertThat(operation).isInstanceOf(AlterTableChangeOperation.class);
@@ -1227,18 +1233,19 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
         // rename column e test computed column expression is ApiExpression which doesn't implement
         // the equals method
         CatalogTable catalogTable2 =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("a", DataTypes.STRING().notNull())
-                                .column("b", DataTypes.INT().notNull())
-                                .column("e", DataTypes.STRING())
-                                .columnByExpression("j", $("e").upperCase())
-                                .columnByExpression("g", "TO_TIMESTAMP(e)")
-                                .primaryKey("a", "b")
-                                .build(),
-                        "tb2",
-                        Collections.singletonList("a"),
-                        Collections.emptyMap());
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("a", DataTypes.STRING().notNull())
+                                        .column("b", DataTypes.INT().notNull())
+                                        .column("e", DataTypes.STRING())
+                                        .columnByExpression("j", $("e").upperCase())
+                                        .columnByExpression("g", "TO_TIMESTAMP(e)")
+                                        .primaryKey("a", "b")
+                                        .build())
+                        .comment("tb2")
+                        .partitionKeys(Collections.singletonList("a"))
+                        .build();
         catalogManager
                 .getCatalog("cat1")
                 .get()
@@ -1256,7 +1263,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                         "Failed to execute ALTER TABLE statement.\nThe column `a` is used as the partition keys.");
         checkAlterNonExistTable("alter table %s nonexistent rename a to a1");
 
-        prepareNonManagedTableWithDistribution("tb3");
+        prepareTableWithDistribution("tb3", false);
         // rename column used as distribution key
         assertThatThrownBy(() -> parse("alter table tb3 rename c to a1"))
                 .isInstanceOf(ValidationException.class)
@@ -1266,8 +1273,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableDropColumn() throws Exception {
-        prepareTable("tb1", false, false, true, 3);
+    void testFailedToAlterTableDropColumn() throws Exception {
+        prepareTable("tb1", false, true, 3);
 
         // drop a nonexistent column
         assertThatThrownBy(() -> parse("alter table tb1 drop x"))
@@ -1298,7 +1305,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("The column `c` is used as the primary key.");
 
-        prepareNonManagedTableWithDistribution("tb3");
+        prepareTableWithDistribution("tb3", false);
         assertThatThrownBy(() -> parse("alter table tb3 drop c"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("The column `c` is used as a distribution key.");
@@ -1311,8 +1318,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableDropColumn() throws Exception {
-        prepareNonManagedTable(false);
+    void testAlterTableDropColumn() throws Exception {
+        prepareTable(false);
         // drop a single column
         Operation operation = parse("alter table tb1 drop c");
         assertThat(operation).isInstanceOf(AlterTableChangeOperation.class);
@@ -1343,15 +1350,15 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableDropConstraint() throws Exception {
-        prepareNonManagedTable("tb1", 0);
+    void testFailedToAlterTableDropConstraint() throws Exception {
+        prepareTable("tb1", 0);
         assertThatThrownBy(() -> parse("alter table tb1 drop primary key"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("The base table does not define any primary key.");
         assertThatThrownBy(() -> parse("alter table tb1 drop constraint ct"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("The base table does not define any primary key.");
-        prepareNonManagedTable("tb2", 1);
+        prepareTable("tb2", 1);
         assertThatThrownBy(() -> parse("alter table tb2 drop constraint ct2"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
@@ -1361,8 +1368,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableDropConstraint() throws Exception {
-        prepareNonManagedTable(true);
+    void testAlterTableDropConstraint() throws Exception {
+        prepareTable(true);
         String expectedSummaryString = "ALTER TABLE cat1.db1.tb1\n  DROP CONSTRAINT ct1";
 
         Operation operation = parse("alter table tb1 drop constraint ct1");
@@ -1377,8 +1384,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableDropDistribution() throws Exception {
-        prepareNonManagedTableWithDistribution("tb1");
+    void testAlterTableDropDistribution() throws Exception {
+        prepareTableWithDistribution("tb1", false);
         String expectedSummaryString = "ALTER TABLE cat1.db1.tb1\n  DROP DISTRIBUTION";
 
         Operation operation = parse("alter table tb1 drop distribution");
@@ -1390,8 +1397,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableDropDistribution() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testFailedToAlterTableDropDistribution() throws Exception {
+        prepareTable("tb1", false);
         assertThatThrownBy(() -> parse("alter table tb1 drop distribution"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
@@ -1399,9 +1406,176 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
         checkAlterNonExistTable("alter table %s nonexistent drop watermark");
     }
 
+    @ParameterizedTest(name = "{index}: {0}")
+    @MethodSource("provideCreateMaterializedTableTestCases")
+    void createMaterializedTableWithVariousOptions(
+            String testName,
+            String sql,
+            String expectedSummaryString,
+            Consumer<CreateMaterializedTableOperation> additionalAssertions) {
+
+        final Operation operation = parse(sql);
+
+        assertThat(operation).isInstanceOf(CreateMaterializedTableOperation.class);
+        assertThat(operation.asSummaryString()).isEqualTo(expectedSummaryString);
+
+        final CreateMaterializedTableOperation createMaterializedTableOperation =
+                (CreateMaterializedTableOperation) operation;
+
+        additionalAssertions.accept(createMaterializedTableOperation);
+    }
+
+    private static Stream<Arguments> provideCreateMaterializedTableTestCases() {
+        return Stream.of(
+                Arguments.of(
+                        "with refresh mode continuous",
+                        "CREATE MATERIALIZED TABLE users_shops (shop_id int, user_id int,"
+                                + " PRIMARY KEY (user_id) not enforced)"
+                                + " WITH(\n"
+                                + "   'format' = 'debezium-json'\n"
+                                + " )\n"
+                                + " FRESHNESS = INTERVAL '30' SECOND\n"
+                                + " REFRESH_MODE = CONTINUOUS\n"
+                                + " AS SELECT 1 as shop_id, 2 as user_id ",
+                        "CREATE MATERIALIZED TABLE: (materializedTable: "
+                                + "[ResolvedCatalogMaterializedTable{origin=DefaultCatalogMaterializedTable{schema=(\n"
+                                + "  `shop_id` INT,\n"
+                                + "  `user_id` INT NOT NULL,\n"
+                                + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
+                                + "), comment='null', distribution=null, partitionKeys=[], "
+                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
+                                + "freshness=INTERVAL '30' SECOND, logicalRefreshMode=CONTINUOUS, refreshMode=CONTINUOUS, "
+                                + "refreshStatus=INITIALIZING, refreshHandlerDescription='null', serializedRefreshHandler=null}, resolvedSchema=(\n"
+                                + "  `shop_id` INT,\n"
+                                + "  `user_id` INT NOT NULL,\n"
+                                + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
+                                + ")}], identifier: [`builtin`.`default`.`users_shops`])",
+                        (Consumer<CreateMaterializedTableOperation>)
+                                op -> {
+                                    assertThat(
+                                                    op.getCatalogMaterializedTable()
+                                                            .getDefinitionFreshness())
+                                            .isEqualTo(IntervalFreshness.ofSecond("30"));
+                                    assertThat(op.getCatalogMaterializedTable().getRefreshMode())
+                                            .isSameAs(RefreshMode.CONTINUOUS);
+                                }),
+                Arguments.of(
+                        "with distribution",
+                        "CREATE MATERIALIZED TABLE users_shops ("
+                                + " PRIMARY KEY (user_id) not enforced)"
+                                + " DISTRIBUTED BY HASH (user_id) INTO 7 BUCKETS\n"
+                                + " WITH(\n"
+                                + "   'format' = 'debezium-json'\n"
+                                + " )\n"
+                                + " FRESHNESS = INTERVAL '30' SECOND\n"
+                                + " AS SELECT 1 as shop_id, 2 as user_id ",
+                        "CREATE MATERIALIZED TABLE: (materializedTable: "
+                                + "[ResolvedCatalogMaterializedTable{origin=DefaultCatalogMaterializedTable{schema=(\n"
+                                + "  `shop_id` INT NOT NULL,\n"
+                                + "  `user_id` INT NOT NULL,\n"
+                                + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
+                                + "), comment='null', distribution=DISTRIBUTED BY HASH(`user_id`) INTO 7 BUCKETS, partitionKeys=[], "
+                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
+                                + "freshness=INTERVAL '30' SECOND, logicalRefreshMode=AUTOMATIC, refreshMode=null, "
+                                + "refreshStatus=INITIALIZING, refreshHandlerDescription='null', serializedRefreshHandler=null}, resolvedSchema=(\n"
+                                + "  `shop_id` INT NOT NULL,\n"
+                                + "  `user_id` INT NOT NULL,\n"
+                                + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
+                                + ")}], identifier: [`builtin`.`default`.`users_shops`])",
+                        (Consumer<CreateMaterializedTableOperation>)
+                                op ->
+                                        assertThat(
+                                                        op.getCatalogMaterializedTable()
+                                                                .getDistribution()
+                                                                .get())
+                                                .isEqualTo(
+                                                        TableDistribution.of(
+                                                                Kind.HASH,
+                                                                7,
+                                                                List.of("user_id")))));
+    }
+
     @Test
-    public void testFailedToAlterTableDropWatermark() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testAlterMaterializedTableDropDistribution() throws Exception {
+        prepareMaterializedTable(
+                "tb1", false, 1, TableDistribution.of(Kind.HASH, 2, List.of("a")), "SELECT 1");
+
+        final String expectedSummaryString =
+                "ALTER MATERIALIZED TABLE cat1.db1.tb1\n  DROP DISTRIBUTION";
+
+        final Operation operation = parse("alter materialized table tb1 drop distribution");
+
+        assertThat(operation).isInstanceOf(AlterMaterializedTableChangeOperation.class);
+        assertThat(operation.asSummaryString()).isEqualTo(expectedSummaryString);
+        assertThat(((AlterMaterializedTableChangeOperation) operation).getTableChanges())
+                .containsExactly(TableChange.dropDistribution());
+
+        prepareMaterializedTable("tb2", false, 1, null, "SELECT 1");
+
+        assertThatThrownBy(() -> parse("alter MATERIALIZED table tb2 drop distribution"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Materialized table `cat1`.`db1`.`tb2` does not have a distribution to drop.");
+    }
+
+    @Test
+    void testAlterMaterializedTableAddDistribution() throws Exception {
+        prepareMaterializedTable("tb1", false, 1, null, "SELECT 1");
+
+        final String expectedSummaryString =
+                "ALTER MATERIALIZED TABLE cat1.db1.tb1\n  ADD DISTRIBUTED INTO 3 BUCKETS";
+
+        final Operation operation =
+                parse("alter materialized table tb1 add distribution into 3 buckets");
+
+        assertThat(operation).isInstanceOf(AlterMaterializedTableChangeOperation.class);
+        assertThat(operation.asSummaryString()).isEqualTo(expectedSummaryString);
+        assertThat(((AlterMaterializedTableChangeOperation) operation).getTableChanges())
+                .containsExactly(TableChange.add(TableDistribution.of(Kind.UNKNOWN, 3, List.of())));
+
+        prepareMaterializedTable(
+                "tb2", false, 1, TableDistribution.of(Kind.HASH, 1, List.of("a")), "SELECT 1");
+
+        assertThatThrownBy(
+                        () ->
+                                parse(
+                                        "alter materialized table cat1.db1.tb2 add distribution into 3 buckets"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Materialized table `cat1`.`db1`.`tb2` has already defined "
+                                + "the distribution `DISTRIBUTED BY HASH(`a`) INTO 1 BUCKETS`."
+                                + " You can modify it or drop it before adding a new one.");
+    }
+
+    @Test
+    void testAlterMaterializedTableModifyDistribution() throws Exception {
+        prepareMaterializedTable(
+                "tb1", false, 1, TableDistribution.of(Kind.HASH, 1, List.of("a")), "SELECT 1");
+        String expectedSummaryString =
+                "ALTER MATERIALIZED TABLE cat1.db1.tb1\n  MODIFY DISTRIBUTED INTO 3 BUCKETS";
+
+        Operation operation =
+                parse("alter MATERIALIZED table tb1 modify distribution into 3 buckets");
+        assertThat(operation).isInstanceOf(AlterMaterializedTableChangeOperation.class);
+        assertThat(operation.asSummaryString()).isEqualTo(expectedSummaryString);
+        assertThat(((AlterMaterializedTableChangeOperation) operation).getTableChanges())
+                .containsExactly(
+                        TableChange.modify(TableDistribution.of(Kind.UNKNOWN, 3, List.of())));
+
+        prepareMaterializedTable("tb2", false, 1, null, "SELECT 1");
+
+        assertThatThrownBy(
+                        () ->
+                                parse(
+                                        "alter MATERIALIZED table cat1.db1.tb2 modify distribution into 3 buckets"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Materialized table `cat1`.`db1`.`tb2` does not have a distribution to modify.");
+    }
+
+    @Test
+    void testFailedToAlterTableDropWatermark() throws Exception {
+        prepareTable("tb1", false);
         assertThatThrownBy(() -> parse("alter table tb1 drop watermark"))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("The base table does not define any watermark strategy.");
@@ -1409,8 +1583,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableDropWatermark() throws Exception {
-        prepareNonManagedTable("tb1", true);
+    void testAlterTableDropWatermark() throws Exception {
+        prepareTable("tb1", true);
         Operation operation = parse("alter table tb1 drop watermark");
         assertThat(operation).isInstanceOf(AlterTableChangeOperation.class);
         assertThat(operation.asSummaryString())
@@ -1424,64 +1598,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableCompactOnNonManagedTable() throws Exception {
-        prepareNonManagedTable(false);
-        assertThatThrownBy(() -> parse("alter table tb1 compact"))
-                .isInstanceOf(ValidationException.class)
-                .hasMessage(
-                        "ALTER TABLE COMPACT operation is not supported for non-managed table `cat1`.`db1`.`tb1`");
-    }
-
-    @Test
-    public void testAlterTableCompactOnManagedNonPartitionedTable() throws Exception {
-        prepareManagedTable(false);
-
-        // specify partition on a non-partitioned table
-        assertThatThrownBy(() -> parse("alter table tb1 partition(dt = 'a') compact"))
-                .isInstanceOf(ValidationException.class)
-                .hasMessage(
-                        "Partition column 'dt' not defined in the table schema. Table `cat1`.`db1`.`tb1` is not partitioned.");
-
-        // alter a non-existed table
-        checkAlterNonExistTable("alter table %s nonexistent compact");
-
-        checkAlterTableCompact(parse("alter table tb1 compact"), Collections.emptyMap());
-    }
-
-    @Test
-    public void testAlterTableCompactOnManagedPartitionedTable() throws Exception {
-        prepareManagedTable(true);
-        // compact partitioned table with a non-existed partition_spec
-        assertThatThrownBy(() -> parse("alter table tb1 partition (dt = 'a') compact"))
-                .isInstanceOf(ValidationException.class)
-                .hasMessage(
-                        "Partition column 'dt' not defined in the table schema. Available ordered partition columns: ['b', 'c']");
-
-        // compact partitioned table with full partition spec
-        Map<String, String> staticPartitions = new HashMap<>();
-        staticPartitions.put("b", "0");
-        staticPartitions.put("c", "flink");
-        checkAlterTableCompact(
-                parse("alter table tb1 partition (b = 0, c = 'flink') compact"), staticPartitions);
-
-        // compact partitioned table with subordinate partition spec
-        staticPartitions = Collections.singletonMap("b", "0");
-        checkAlterTableCompact(
-                parse("alter table tb1 partition (b = 0) compact"), staticPartitions);
-
-        // compact partitioned table with secondary partition spec
-        staticPartitions = Collections.singletonMap("c", "flink");
-        checkAlterTableCompact(
-                parse("alter table tb1 partition (c = 'flink') compact"), staticPartitions);
-
-        // compact partitioned table without partition spec
-        staticPartitions = Collections.emptyMap();
-        checkAlterTableCompact(parse("alter table tb1 compact"), staticPartitions);
-    }
-
-    @Test
-    public void testFailedToAlterTableAddColumn() throws Exception {
-        prepareNonManagedTable("tb1", 0);
+    void testFailedToAlterTableAddColumn() throws Exception {
+        prepareTable("tb1", 0);
 
         // try to add a column with duplicated name
         assertThatThrownBy(() -> parse("alter table tb1 add a bigint"))
@@ -1536,8 +1654,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableAddColumn() throws Exception {
-        prepareNonManagedTable("tb1", 0);
+    void testAlterTableAddColumn() throws Exception {
+        prepareTable("tb1", 0);
 
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb1");
         Schema originalSchema =
@@ -1650,9 +1768,9 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableAddPk() throws Exception {
+    void testFailedToAlterTableAddPk() throws Exception {
         // the original table has one pk
-        prepareNonManagedTable("tb1", 1);
+        prepareTable("tb1", 1);
 
         assertThatThrownBy(() -> parse("alter table tb1 add primary key(c) not enforced"))
                 .isInstanceOf(ValidationException.class)
@@ -1670,7 +1788,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                 + "You might want to drop it before adding a new one");
 
         // the original table has composite pk
-        prepareNonManagedTable("tb2", 2);
+        prepareTable("tb2", 2);
 
         assertThatThrownBy(() -> parse("alter table tb2 add primary key(c) not enforced"))
                 .isInstanceOf(ValidationException.class)
@@ -1688,7 +1806,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                 + "You might want to drop it before adding a new one");
 
         // the original table does not define pk
-        prepareNonManagedTable("tb3", 0);
+        prepareTable("tb3", 0);
 
         // specify a nonexistent column as pk
         assertThatThrownBy(() -> parse("alter table tb3 add primary key (x) not enforced"))
@@ -1726,8 +1844,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableAddPrimaryKey() throws Exception {
-        prepareNonManagedTable("tb1", 0);
+    void testAlterTableAddPrimaryKey() throws Exception {
+        prepareTable("tb1", 0);
 
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb1");
         Schema originalSchema =
@@ -1796,8 +1914,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableAddWatermark() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testFailedToAlterTableAddWatermark() throws Exception {
+        prepareTable("tb1", false);
 
         // add watermark with an undefined column as rowtime
         assertThatThrownBy(() -> parse("alter table tb1 add watermark for x as x"))
@@ -1823,7 +1941,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 .hasMessageContaining("Watermark strategy on nested column is not supported yet.");
 
         // add watermark to the table which already has watermark defined
-        prepareNonManagedTable("tb2", true);
+        prepareTable("tb2", true);
 
         assertThatThrownBy(() -> parse("alter table tb2 add watermark for ts as ts"))
                 .isInstanceOf(ValidationException.class)
@@ -1835,8 +1953,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableAddWatermark() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testAlterTableAddWatermark() throws Exception {
+        prepareTable("tb1", false);
 
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb1");
         Schema originalSchema =
@@ -1918,8 +2036,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableModifyColumn() throws Exception {
-        prepareNonManagedTable("tb1", true);
+    void testFailedToAlterTableModifyColumn() throws Exception {
+        prepareTable("tb1", true);
 
         // modify duplicated column same
         assertThatThrownBy(() -> parse("alter table tb1 modify (b int, b array<int not null>)"))
@@ -1964,7 +2082,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                 + "the supported precision 'p' is from 0 to 3, but the time field type is INT");
 
         // modify pk fields
-        prepareNonManagedTable("tb2", 1);
+        prepareTable("tb2", 1);
 
         assertThatThrownBy(() -> parse("alter table tb2 modify (d int, a as b + 2)"))
                 .isInstanceOf(ValidationException.class)
@@ -1993,8 +2111,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableModifyColumn() throws Exception {
-        prepareNonManagedTable("tb1", 2);
+    void testAlterTableModifyColumn() throws Exception {
+        prepareTable("tb1", 2);
 
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb1");
 
@@ -2106,7 +2224,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                         .build());
 
         // modify multiple columns and watermark spec
-        prepareNonManagedTable("tb2", true);
+        prepareTable("tb2", true);
         tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb2");
         operation =
                 parse(
@@ -2144,8 +2262,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableModifyPk() throws Exception {
-        prepareNonManagedTable("tb1", 0);
+    void testFailedToAlterTableModifyPk() throws Exception {
+        prepareTable("tb1", 0);
 
         // modify pk on a table without pk specified
         assertThatThrownBy(
@@ -2156,7 +2274,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 .hasMessageContaining(
                         "The base table does not define any primary key constraint. You might want to add a new one.");
 
-        prepareNonManagedTable("tb2", 1);
+        prepareTable("tb2", 1);
 
         // specify a nonexistent column as pk
         assertThatThrownBy(
@@ -2188,8 +2306,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableModifyPk() throws Exception {
-        prepareNonManagedTable("tb1", 1);
+    void testAlterTableModifyPk() throws Exception {
+        prepareTable("tb1", 1);
 
         // test modify constraint name
         Operation operation =
@@ -2235,8 +2353,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableAddDistribution() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testAlterTableAddDistribution() throws Exception {
+        prepareTable("tb1", false);
 
         Operation operation = parse("alter table tb1 add distribution by hash(a) into 12 buckets");
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", "tb1");
@@ -2244,12 +2362,12 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 operation,
                 tableIdentifier,
                 TableDistribution.ofHash(Collections.singletonList("a"), 12),
-                "ALTER TABLE cat1.db1.tb1\n" + "  ADD DISTRIBUTED BY HASH(`a`) INTO 12 BUCKETS\n");
+                "ALTER TABLE cat1.db1.tb1\n" + "  ADD DISTRIBUTED BY HASH(`a`) INTO 12 BUCKETS");
     }
 
     @Test
-    public void testFailedToAlterTableAddDistribution() throws Exception {
-        prepareNonManagedTableWithDistribution("tb1");
+    void testFailedToAlterTableAddDistribution() throws Exception {
+        prepareTableWithDistribution("tb1", false);
 
         // add distribution on a table with distribution
         assertThatThrownBy(
@@ -2259,8 +2377,25 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testFailedToAlterTableModifyDistribution() throws Exception {
-        prepareNonManagedTable("tb2", false);
+    void testNonEmptyDistributionNotChangedWithOtherModify() throws Exception {
+        final CatalogTable table = prepareTableWithDistribution("tb1", true);
+
+        assertThat(table.getDistribution()).isPresent();
+        assertThat(table.getDistribution().get().getBucketKeys()).containsExactly("c");
+
+        final Operation operation =
+                parse("ALTER TABLE tb1 MODIFY WATERMARK FOR ts AS ts - INTERVAL '1' MINUTE");
+
+        assertThat(operation).isInstanceOf(AlterTableChangeOperation.class);
+        Optional<TableDistribution> distribution =
+                ((AlterTableChangeOperation) operation).getNewTable().getDistribution();
+        assertThat(distribution).isPresent();
+        assertThat(distribution.get().getBucketKeys()).containsExactly("c");
+    }
+
+    @Test
+    void testFailedToAlterTableModifyDistribution() throws Exception {
+        prepareTable("tb2", false);
 
         // modify distribution on a table without distribution
         assertThatThrownBy(
@@ -2273,8 +2408,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableModifyDistribution() throws Exception {
-        prepareNonManagedTableWithDistribution("tb1");
+    void testAlterTableModifyDistribution() throws Exception {
+        prepareTableWithDistribution("tb1", false);
 
         Operation operation =
                 parse("alter table tb1 modify distribution by hash(c) into 12 buckets");
@@ -2283,13 +2418,12 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 operation,
                 tableIdentifier,
                 TableDistribution.ofHash(Collections.singletonList("c"), 12),
-                "ALTER TABLE cat1.db1.tb1\n"
-                        + "  MODIFY DISTRIBUTED BY HASH(`c`) INTO 12 BUCKETS\n");
+                "ALTER TABLE cat1.db1.tb1\n" + "  MODIFY DISTRIBUTED BY HASH(`c`) INTO 12 BUCKETS");
     }
 
     @Test
-    public void testFailedToAlterTableModifyWatermark() throws Exception {
-        prepareNonManagedTable("tb1", false);
+    void testFailedToAlterTableModifyWatermark() throws Exception {
+        prepareTable("tb1", false);
 
         // modify watermark on a table without watermark
         assertThatThrownBy(
@@ -2300,7 +2434,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 .hasMessageContaining(
                         "The base table does not define any watermark. You might want to add a new one.");
 
-        prepareNonManagedTable("tb2", true);
+        prepareTable("tb2", true);
 
         // specify invalid watermark spec
         assertThatThrownBy(() -> parse("alter table tb2 modify watermark for a as a"))
@@ -2323,8 +2457,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableModifyWatermark() throws Exception {
-        prepareNonManagedTable("tb1", true);
+    void testAlterTableModifyWatermark() throws Exception {
+        prepareTable("tb1", true);
 
         // modify watermark offset
         Operation operation = parse("alter table tb1 modify watermark for ts as ts");
@@ -2353,23 +2487,24 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateViewWithMatchRecognize() {
+    void testCreateViewWithMatchRecognize() {
         Map<String, String> prop = new HashMap<>();
         prop.put("connector", "values");
         prop.put("bounded", "true");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("id", DataTypes.INT().notNull())
-                                .column("measurement", DataTypes.BIGINT().notNull())
-                                .column(
-                                        "ts",
-                                        DataTypes.ROW(
-                                                DataTypes.FIELD("tmstmp", DataTypes.TIMESTAMP(3))))
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        prop);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT().notNull())
+                                        .column("measurement", DataTypes.BIGINT().notNull())
+                                        .column(
+                                                "ts",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "tmstmp", DataTypes.TIMESTAMP(3))))
+                                        .build())
+                        .options(prop)
+                        .build();
 
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "events"), false);
@@ -2395,19 +2530,19 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateViewWithDynamicTableOptions() {
+    void testCreateViewWithDynamicTableOptions() {
         Map<String, String> prop = new HashMap<>();
         prop.put("connector", "values");
         prop.put("bounded", "true");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("f0", DataTypes.INT())
-                                .column("f1", DataTypes.VARCHAR(20))
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        prop);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("f0", DataTypes.INT())
+                                        .column("f1", DataTypes.VARCHAR(20))
+                                        .build())
+                        .options(prop)
+                        .build();
 
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "sourceA"), false);
@@ -2423,8 +2558,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableAddPartitions() throws Exception {
-        prepareTable("tb1", false, true, true, 0);
+    void testAlterTableAddPartitions() throws Exception {
+        prepareTable("tb1", true, true, 0);
 
         // test add single partition
         Operation operation = parse("alter table tb1 add partition (b = '1', c = '2')");
@@ -2450,8 +2585,8 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testAlterTableDropPartitions() throws Exception {
-        prepareTable("tb1", false, true, true, 0);
+    void testAlterTableDropPartitions() throws Exception {
+        prepareTable("tb1", true, true, 0);
         // test drop single partition
         Operation operation = parse("alter table tb1 drop partition (b = '1', c = '2')");
         assertThat(operation).isInstanceOf(DropPartitionsOperation.class);
@@ -2469,19 +2604,19 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
     }
 
     @Test
-    public void testCreateViewWithDuplicateFieldName() {
+    void testCreateViewWithDuplicateFieldName() {
         Map<String, String> prop = new HashMap<>();
         prop.put("connector", "values");
         prop.put("bounded", "true");
         CatalogTable catalogTable =
-                CatalogTable.of(
-                        Schema.newBuilder()
-                                .column("id", DataTypes.BIGINT().notNull())
-                                .column("uid", DataTypes.BIGINT().notNull())
-                                .build(),
-                        null,
-                        Collections.emptyList(),
-                        prop);
+                CatalogTable.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.BIGINT().notNull())
+                                        .column("uid", DataTypes.BIGINT().notNull())
+                                        .build())
+                        .options(prop)
+                        .build();
 
         catalogManager.createTable(
                 catalogTable, ObjectIdentifier.of("builtin", "default", "id_table"), false);
@@ -2532,6 +2667,27 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                                 "A column with the same name `id` has been defined at line 5, column 8."));
     }
 
+    @Test
+    void testAlterInvalidOperationsForMaterializedTables() throws Exception {
+        prepareMaterializedTable("my_materialized_table", false, 1, null, "SELECT 1");
+
+        assertThatThrownBy(() -> parse("alter table my_materialized_table RENAME to new_name"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessage("ALTER TABLE for a materialized table is not allowed");
+
+        assertThatThrownBy(() -> parse("analyze table my_materialized_table compute statistics"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessage("ANALYZE TABLE for a materialized table is not allowed");
+
+        assertThatThrownBy(() -> parse("alter view my_materialized_table RENAME to new_name"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessage("ALTER VIEW for a materialized table is not allowed");
+
+        assertThatThrownBy(() -> parse("truncate table my_materialized_table"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessage("TRUNCATE TABLE for a materialized table is not allowed");
+    }
+
     // ~ Tool Methods ----------------------------------------------------------
 
     private static TestItem createTestItem(Object... args) {
@@ -2546,51 +2702,40 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
         return testItem;
     }
 
-    private void prepareNonManagedTable(boolean hasConstraint) throws Exception {
-        prepareNonManagedTable("tb1", hasConstraint ? 1 : 0);
+    private CatalogTable prepareTable(boolean hasConstraint) throws Exception {
+        return prepareTable("tb1", hasConstraint ? 1 : 0);
     }
 
-    private void prepareNonManagedTable(String tableName, int numOfPkFields) throws Exception {
-        prepareTable(tableName, false, false, false, numOfPkFields);
+    private CatalogTable prepareTable(String tableName, int numOfPkFields) throws Exception {
+        return prepareTable(tableName, false, false, numOfPkFields);
     }
 
-    private void prepareNonManagedTable(String tableName, boolean hasWatermark) throws Exception {
-        prepareTable(tableName, false, false, hasWatermark, 0);
+    private CatalogTable prepareTable(String tableName, boolean hasWatermark) throws Exception {
+        return prepareTable(tableName, false, hasWatermark, 0);
     }
 
-    private void prepareManagedTable(boolean hasPartition) throws Exception {
-        TestManagedTableFactory.MANAGED_TABLES.put(
-                ObjectIdentifier.of("cat1", "db1", "tb1"), new AtomicReference<>());
-        prepareTable("tb1", true, hasPartition, false, 0);
-    }
-
-    private void prepareNonManagedTableWithDistribution(String tableName) throws Exception {
-        TableDistribution distribution =
-                TableDistribution.of(
-                        TableDistribution.Kind.HASH, 6, Collections.singletonList("c"));
-        prepareTable(tableName, false, false, false, 0, distribution);
-    }
-
-    private void prepareTable(
-            String tableName,
-            boolean managedTable,
-            boolean hasPartition,
-            boolean hasWatermark,
-            int numOfPkFields)
+    private CatalogTable prepareTableWithDistribution(String tableName, boolean withWatermark)
             throws Exception {
-        prepareTable(tableName, managedTable, hasPartition, hasWatermark, numOfPkFields, null);
+        TableDistribution distribution =
+                TableDistribution.of(Kind.HASH, 6, Collections.singletonList("c"));
+        return prepareTable(tableName, false, withWatermark, 0, distribution);
     }
 
-    private void prepareTable(
+    private CatalogTable prepareTable(
+            String tableName, boolean hasPartition, boolean hasWatermark, int numOfPkFields)
+            throws Exception {
+        return prepareTable(tableName, hasPartition, hasWatermark, numOfPkFields, null);
+    }
+
+    private CatalogTable prepareTable(
             String tableName,
-            boolean managedTable,
             boolean hasPartition,
             boolean hasWatermark,
             int numOfPkFields,
             @Nullable TableDistribution tableDistribution)
             throws Exception {
         Catalog catalog = new GenericInMemoryCatalog("default", "default");
-        if (!catalogManager.getCatalog("cat1").isPresent()) {
+        if (catalogManager.getCatalog("cat1").isEmpty()) {
             catalogManager.registerCatalog("cat1", catalog);
         }
         catalogManager.createDatabase(
@@ -2616,9 +2761,7 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                         .withComment("just a comment");
         Map<String, String> options = new HashMap<>();
         options.put("k", "v");
-        if (!managedTable) {
-            options.put("connector", "dummy");
-        }
+        options.put("connector", "dummy");
         if (numOfPkFields == 0) {
             // do nothing
         } else if (numOfPkFields == 1) {
@@ -2653,6 +2796,82 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
         catalogManager.setCurrentDatabase("db1");
         ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", tableName);
         catalogManager.createTable(catalogTable, tableIdentifier, true);
+        return catalogTable;
+    }
+
+    private CatalogMaterializedTable prepareMaterializedTable(
+            String tableName,
+            boolean hasPartition,
+            int numOfPkFields,
+            @Nullable TableDistribution tableDistribution,
+            String query)
+            throws Exception {
+        Catalog catalog = new GenericInMemoryCatalog("default", "default");
+        if (catalogManager.getCatalog("cat1").isEmpty()) {
+            catalogManager.registerCatalog("cat1", catalog);
+        }
+        catalogManager.createDatabase(
+                "cat1", "db1", new CatalogDatabaseImpl(new HashMap<>(), null), true);
+        Schema.Builder builder =
+                Schema.newBuilder()
+                        .column("a", DataTypes.INT().notNull())
+                        .column("b", DataTypes.BIGINT().notNull())
+                        .column("c", DataTypes.STRING().notNull())
+                        .withComment("column comment")
+                        .columnByExpression("d", "a*(b+2 + a*b)")
+                        .column(
+                                "e",
+                                DataTypes.ROW(
+                                        DataTypes.STRING(),
+                                        DataTypes.INT(),
+                                        DataTypes.ROW(
+                                                DataTypes.DOUBLE(),
+                                                DataTypes.ARRAY(DataTypes.FLOAT()))))
+                        .columnByExpression("f", "e.f1 + e.f2.f0")
+                        .columnByMetadata("g", DataTypes.STRING(), null, true)
+                        .column("ts", DataTypes.TIMESTAMP(3))
+                        .withComment("just a comment");
+        Map<String, String> options = new HashMap<>();
+        options.put("k", "v");
+        options.put("connector", "dummy");
+        if (numOfPkFields == 0) {
+            // do nothing
+        } else if (numOfPkFields == 1) {
+            builder.primaryKeyNamed("ct1", "a");
+        } else if (numOfPkFields == 2) {
+            builder.primaryKeyNamed("ct1", "a", "b");
+        } else if (numOfPkFields == 3) {
+            builder.primaryKeyNamed("ct1", "a", "b", "c");
+        } else {
+            throw new IllegalArgumentException(
+                    String.format("Don't support to set pk with %s fields.", numOfPkFields));
+        }
+
+        CatalogMaterializedTable.Builder tableBuilder =
+                CatalogMaterializedTable.newBuilder()
+                        .schema(builder.build())
+                        .comment("a table")
+                        .partitionKeys(
+                                hasPartition ? Arrays.asList("b", "c") : Collections.emptyList())
+                        .options(Collections.unmodifiableMap(options))
+                        .freshness(IntervalFreshness.ofHour("2"))
+                        .logicalRefreshMode(LogicalRefreshMode.CONTINUOUS)
+                        .refreshMode(RefreshMode.CONTINUOUS)
+                        .refreshStatus(RefreshStatus.ACTIVATED)
+                        .originalQuery(query)
+                        .expandedQuery(query);
+
+        if (tableDistribution != null) {
+            tableBuilder.distribution(tableDistribution);
+        }
+
+        CatalogMaterializedTable catalogTable = tableBuilder.build();
+
+        catalogManager.setCurrentCatalog("cat1");
+        catalogManager.setCurrentDatabase("db1");
+        ObjectIdentifier tableIdentifier = ObjectIdentifier.of("cat1", "db1", tableName);
+        catalogManager.createTable(catalogTable, tableIdentifier, true);
+        return catalogTable;
     }
 
     private void assertAlterTableOptions(
@@ -2702,29 +2921,6 @@ public class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversion
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
                         "Table `cat1`.`db1`.`nonexistent` doesn't exist or is a temporary table.");
-    }
-
-    private void checkAlterTableCompact(Operation operation, Map<String, String> staticPartitions) {
-        assertThat(operation).isInstanceOf(SinkModifyOperation.class);
-        SinkModifyOperation modifyOperation = (SinkModifyOperation) operation;
-        assertThat(modifyOperation.getStaticPartitions())
-                .containsExactlyInAnyOrderEntriesOf(staticPartitions);
-        assertThat(modifyOperation.isOverwrite()).isFalse();
-        assertThat(modifyOperation.getDynamicOptions())
-                .containsEntry(
-                        TestManagedTableFactory.ENRICHED_KEY,
-                        TestManagedTableFactory.ENRICHED_VALUE);
-        ContextResolvedTable contextResolvedTable = modifyOperation.getContextResolvedTable();
-        assertThat(contextResolvedTable.getIdentifier())
-                .isEqualTo(ObjectIdentifier.of("cat1", "db1", "tb1"));
-        assertThat(modifyOperation.getChild()).isInstanceOf(SourceQueryOperation.class);
-        SourceQueryOperation child = (SourceQueryOperation) modifyOperation.getChild();
-        assertThat(child.getChildren()).isEmpty();
-        assertThat(child.getDynamicOptions()).containsEntry("k", "v");
-        assertThat(child.getDynamicOptions())
-                .containsEntry(
-                        TestManagedTableFactory.ENRICHED_KEY,
-                        TestManagedTableFactory.ENRICHED_VALUE);
     }
 
     // ~ Inner Classes ----------------------------------------------------------

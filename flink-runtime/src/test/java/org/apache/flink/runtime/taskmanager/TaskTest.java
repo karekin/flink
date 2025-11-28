@@ -51,6 +51,7 @@ import org.apache.flink.runtime.taskexecutor.PartitionProducerStateChecker;
 import org.apache.flink.runtime.util.NettyShuffleDescriptorBuilder;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorResource;
+import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
 import org.apache.flink.util.WrappingRuntimeException;
@@ -124,6 +125,31 @@ public class TaskTest extends TestLogger {
         if (shuffleEnvironment != null) {
             shuffleEnvironment.close();
         }
+    }
+
+    @Test
+    public void testTaskFailedWithCleanupCancelledExternally() throws Exception {
+        testTaskFailedWithCleanupFailingExternally(false);
+    }
+
+    @Test
+    public void testTaskFailedWithCleanupFailingExternally() throws Exception {
+        testTaskFailedWithCleanupFailingExternally(true);
+    }
+
+    public void testTaskFailedWithCleanupFailingExternally(boolean cancelled) throws Exception {
+        Task task =
+                createTaskBuilder()
+                        .setInvokable(
+                                cancelled
+                                        ? InvokableWithExceptionAndCleanUpFailingExternallyWithCancel
+                                                .class
+                                        : InvokableWithExceptionAndCleanUpFailingExternally.class)
+                        .build(Executors.directExecutor());
+        task.run();
+
+        assertEquals(ExecutionState.FAILED, task.getExecutionState());
+        ExceptionUtils.assertThrowable(task.getFailureCause(), ExpectedTestException.class);
     }
 
     @Test
@@ -450,6 +476,7 @@ public class TaskTest extends TestLogger {
 
         task.cancelExecution();
         assertTrue(
+                task.getExecutionState().toString(),
                 task.getExecutionState() == ExecutionState.CANCELING
                         || task.getExecutionState() == ExecutionState.CANCELED);
 
@@ -480,6 +507,7 @@ public class TaskTest extends TestLogger {
 
         task.cancelExecution();
         assertTrue(
+                task.getExecutionState().toString(),
                 task.getExecutionState() == ExecutionState.CANCELING
                         || task.getExecutionState() == ExecutionState.CANCELED);
 
@@ -936,6 +964,36 @@ public class TaskTest extends TestLogger {
     }
 
     /**
+     * Tests that interrupt happens via watch dog if canceller is stuck in cancel. Task cancellation
+     * blocks the task canceller. Interrupt after cancel via cancellation watch dog.
+     */
+    @Test
+    public void testWatchDogThrowFatalErrorOnTaskStuckInInstantiation() throws Exception {
+        final InterruptOnFatalErrorTaskManagerActions taskManagerActions =
+                new InterruptOnFatalErrorTaskManagerActions();
+
+        final Configuration config = new Configuration();
+        config.set(TaskManagerOptions.TASK_CANCELLATION_INTERVAL, Duration.ofMillis(5));
+        config.set(TaskManagerOptions.TASK_CANCELLATION_TIMEOUT, Duration.ofMillis(1000L));
+
+        final Task task =
+                createTaskBuilder()
+                        .setInvokable(InvokableBlockingInInstantiation.class)
+                        .setTaskManagerConfig(config)
+                        .setTaskManagerActions(taskManagerActions)
+                        .build(Executors.directExecutor());
+        taskManagerActions.setExecutingThread(task.getExecutingThread());
+
+        task.startTaskThread();
+        InvokableBlockingInInstantiation.await();
+        task.cancelExecution();
+        task.getExecutingThread().join();
+
+        // Expect fatal error to recover
+        assertTrue(taskManagerActions.hasFatalError());
+    }
+
+    /**
      * The 'invoke' method holds a lock (trigger awaitLatch after acquisition) and cancel cannot
      * complete because it also tries to acquire the same lock. This is resolved by the watch dog,
      * no fatal error.
@@ -1284,6 +1342,26 @@ public class TaskTest extends TestLogger {
         }
     }
 
+    /** Customized TaskManagerActions that interrupts task thread on fatal error. */
+    private static class InterruptOnFatalErrorTaskManagerActions extends NoOpTaskManagerActions {
+        private boolean fatalError = false;
+        private Thread executingThread;
+
+        @Override
+        public void notifyFatalError(String message, Throwable cause) {
+            fatalError = true;
+            executingThread.interrupt();
+        }
+
+        public boolean hasFatalError() {
+            return fatalError;
+        }
+
+        public void setExecutingThread(Thread executingThread) {
+            this.executingThread = executingThread;
+        }
+    }
+
     // ------------------------------------------------------------------------
     //  helper functions
     // ------------------------------------------------------------------------
@@ -1333,6 +1411,43 @@ public class TaskTest extends TestLogger {
         @Override
         public void cleanUp(Throwable throwable) throws Exception {
             wasCleanedUp = true;
+            super.cleanUp(throwable);
+        }
+    }
+
+    private static final class InvokableWithExceptionAndCleanUpFailingExternallyWithCancel
+            extends AbstractInvokable {
+        public InvokableWithExceptionAndCleanUpFailingExternallyWithCancel(
+                Environment environment) {
+            super(environment);
+        }
+
+        @Override
+        public void invoke() throws Exception {
+            throw new ExpectedTestException("THIS!");
+        }
+
+        @Override
+        public void cleanUp(Throwable throwable) throws Exception {
+            getEnvironment().failExternally(new CancelTaskException("NOT THIS!"));
+            super.cleanUp(throwable);
+        }
+    }
+
+    private static final class InvokableWithExceptionAndCleanUpFailingExternally
+            extends AbstractInvokable {
+        public InvokableWithExceptionAndCleanUpFailingExternally(Environment environment) {
+            super(environment);
+        }
+
+        @Override
+        public void invoke() throws Exception {
+            throw new ExpectedTestException("THIS!");
+        }
+
+        @Override
+        public void cleanUp(Throwable throwable) throws Exception {
+            getEnvironment().failExternally(new Exception("NOT THIS!"));
             super.cleanUp(throwable);
         }
     }
@@ -1569,6 +1684,30 @@ public class TaskTest extends TestLogger {
 
         @Override
         public void cancel() {}
+    }
+
+    /** {@link AbstractInvokable} which blocks in instantiation. */
+    public static final class InvokableBlockingInInstantiation extends AbstractInvokable {
+        /** Declared static, otherwise there's no way to access it when blocking in constructor. */
+        static final OneShotLatch AWAIT_LATCH = new OneShotLatch();
+
+        public InvokableBlockingInInstantiation(Environment environment)
+                throws InterruptedException {
+            super(environment);
+            while (true) {
+                synchronized (this) {
+                    AWAIT_LATCH.trigger();
+                    wait();
+                }
+            }
+        }
+
+        @Override
+        public void invoke() {}
+
+        static void await() throws InterruptedException {
+            AWAIT_LATCH.await();
+        }
     }
 
     // ------------------------------------------------------------------------

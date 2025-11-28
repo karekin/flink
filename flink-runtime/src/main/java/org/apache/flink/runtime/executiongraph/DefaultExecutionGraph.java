@@ -67,6 +67,7 @@ import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
 import org.apache.flink.runtime.operators.coordination.CoordinatorStore;
 import org.apache.flink.runtime.operators.coordination.CoordinatorStoreImpl;
 import org.apache.flink.runtime.query.KvStateLocationRegistry;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismStore;
 import org.apache.flink.runtime.scheduler.InternalFailuresListener;
 import org.apache.flink.runtime.scheduler.SsgNetworkMemoryCalculationUtils;
@@ -280,7 +281,7 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
 
     @Nullable private TernaryBoolean stateChangelogEnabled;
 
-    private String jsonPlan;
+    private JobPlanInfo.Plan plan;
 
     /** Shuffle master to register partitions for task deployment. */
     private final ShuffleMaster<?> shuffleMaster;
@@ -458,6 +459,11 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     }
 
     @Override
+    public int getPendingOperatorCount() {
+        return executionPlanSchedulingContext.getPendingOperatorCount();
+    }
+
+    @Override
     public void enableCheckpointing(
             CheckpointCoordinatorConfiguration chkConfig,
             List<MasterTriggerRestoreHook<?>> masterHooks,
@@ -608,13 +614,18 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     // --------------------------------------------------------------------------------------------
 
     @Override
-    public void setJsonPlan(String jsonPlan) {
-        this.jsonPlan = jsonPlan;
+    public void setPlan(JobPlanInfo.Plan plan) {
+        this.plan = plan;
     }
 
     @Override
-    public String getJsonPlan() {
-        return jsonPlan;
+    public String getStreamGraphJson() {
+        return executionPlanSchedulingContext.getStreamGraphJson();
+    }
+
+    @Override
+    public JobPlanInfo.Plan getPlan() {
+        return plan;
     }
 
     @Override

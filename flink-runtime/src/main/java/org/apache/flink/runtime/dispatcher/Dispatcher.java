@@ -111,6 +111,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -878,8 +879,19 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
 
                     completedJobDetails.forEach(job -> deduplicatedJobs.put(job.getJobId(), job));
                     runningJobDetails.forEach(job -> deduplicatedJobs.put(job.getJobId(), job));
+                    Collection<JobDetails> orderedDeduplicatedJobs =
+                            deduplicatedJobs.values().stream()
+                                    .sorted(
+                                            (jd1, jd2) ->
+                                                    jd1.getStartTime() == jd2.getStartTime()
+                                                            ? jd1.getJobId()
+                                                                    .compareTo(jd2.getJobId())
+                                                            : Long.compare(
+                                                                    jd2.getStartTime(),
+                                                                    jd1.getStartTime()))
+                                    .collect(Collectors.toList());
 
-                    return new MultipleJobsDetails(new HashSet<>(deduplicatedJobs.values()));
+                    return new MultipleJobsDetails(orderedDeduplicatedJobs);
                 });
     }
 
@@ -988,6 +1000,11 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
     }
 
     @Override
+    public CompletableFuture<InetAddress> getBlobServerAddress(Duration timeout) {
+        return CompletableFuture.completedFuture(blobServer.getAddress());
+    }
+
+    @Override
     public CompletableFuture<String> triggerCheckpoint(JobID jobID, Duration timeout) {
         return performOperationOnJobMasterGateway(
                 jobID, gateway -> gateway.triggerCheckpoint(timeout));
@@ -1082,13 +1099,25 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
 
     @Override
     public CompletableFuture<Acknowledge> shutDownCluster() {
-        return shutDownCluster(ApplicationStatus.SUCCEEDED);
+        return internalShutDownCluster(ApplicationStatus.SUCCEEDED, false);
     }
 
     @Override
     public CompletableFuture<Acknowledge> shutDownCluster(
             final ApplicationStatus applicationStatus) {
-        shutDownFuture.complete(applicationStatus);
+        return internalShutDownCluster(applicationStatus, true);
+    }
+
+    private CompletableFuture<Acknowledge> internalShutDownCluster(
+            final ApplicationStatus applicationStatus,
+            final boolean waitForAllJobTerminationFutures) {
+        final CompletableFuture<Void> allJobsTerminationFuture =
+                waitForAllJobTerminationFutures
+                        ? FutureUtils.completeAll(jobManagerRunnerTerminationFutures.values())
+                        : CompletableFuture.completedFuture(null);
+
+        FutureUtils.runAfterwards(
+                allJobsTerminationFuture, () -> shutDownFuture.complete(applicationStatus));
         return CompletableFuture.completedFuture(Acknowledge.get());
     }
 
@@ -1245,7 +1274,8 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
         }
     }
 
-    private void registerJobManagerRunnerTerminationFuture(
+    @VisibleForTesting
+    void registerJobManagerRunnerTerminationFuture(
             JobID jobId, CompletableFuture<Void> jobManagerRunnerTerminationFuture) {
         Preconditions.checkState(!jobManagerRunnerTerminationFutures.containsKey(jobId));
         jobManagerRunnerTerminationFutures.put(jobId, jobManagerRunnerTerminationFuture);

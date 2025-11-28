@@ -18,12 +18,11 @@
 
 package org.apache.flink.sql.parser.ddl;
 
-import org.apache.flink.sql.parser.SqlPartitionUtils;
+import org.apache.flink.sql.parser.SqlParseUtils;
 
-import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlAlter;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
-import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlSpecialOperator;
@@ -32,9 +31,7 @@ import org.apache.calcite.sql.parser.SqlParserPos;
 
 import javax.annotation.Nullable;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
@@ -42,7 +39,7 @@ import static java.util.Objects.requireNonNull;
  * Abstract class to describe statements like ALTER TABLE [IF EXISTS] [[catalogName.]
  * dataBasesName].tableName ...
  */
-public abstract class SqlAlterTable extends SqlCall {
+public abstract class SqlAlterTable extends SqlAlter {
 
     public static final SqlSpecialOperator OPERATOR =
             new SqlSpecialOperator("ALTER TABLE", SqlKind.ALTER_TABLE);
@@ -56,7 +53,7 @@ public abstract class SqlAlterTable extends SqlCall {
             SqlIdentifier tableName,
             @Nullable SqlNodeList partitionSpec,
             boolean ifTableExists) {
-        super(pos);
+        super(pos, "TABLE");
         this.tableIdentifier = requireNonNull(tableName, "tableName should not be null");
         this.partitionSpec = partitionSpec;
         this.ifTableExists = ifTableExists;
@@ -81,14 +78,13 @@ public abstract class SqlAlterTable extends SqlCall {
     }
 
     @Override
-    public void unparse(SqlWriter writer, int leftPrec, int rightPrec) {
-        writer.keyword("ALTER TABLE");
+    public void unparseAlterOperation(SqlWriter writer, int leftPrec, int rightPrec) {
         if (ifTableExists) {
             writer.keyword("IF EXISTS");
         }
         tableIdentifier.unparse(writer, leftPrec, rightPrec);
         SqlNodeList partitionSpec = getPartitionSpec();
-        if (partitionSpec != null && partitionSpec.size() > 0) {
+        if (partitionSpec != null && !partitionSpec.isEmpty()) {
             writer.keyword("PARTITION");
             partitionSpec.unparse(
                     writer, getOperator().getLeftPrec(), getOperator().getRightPrec());
@@ -108,7 +104,7 @@ public abstract class SqlAlterTable extends SqlCall {
 
     /** Get partition spec as key-value strings. */
     public LinkedHashMap<String, String> getPartitionKVs() {
-        return SqlPartitionUtils.getPartitionKVs(getPartitionSpec());
+        return SqlParseUtils.getPartitionKVs(getPartitionSpec());
     }
 
     /**
@@ -118,10 +114,5 @@ public abstract class SqlAlterTable extends SqlCall {
      */
     public boolean ifTableExists() {
         return ifTableExists;
-    }
-
-    /** Alter table context. */
-    public static class AlterTableContext extends SqlCreateTable.TableCreationContext {
-        public List<SqlNode> columnPositions = new ArrayList<>();
     }
 }

@@ -20,14 +20,19 @@ package org.apache.flink.table.planner.plan.nodes.exec.serde;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.FunctionDescriptor;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.api.config.TableConfigOptions.CatalogPlanCompilation;
 import org.apache.flink.table.api.config.TableConfigOptions.CatalogPlanRestore;
+import org.apache.flink.table.catalog.CatalogFunctionImpl;
 import org.apache.flink.table.catalog.ContextResolvedFunction;
 import org.apache.flink.table.catalog.DataTypeFactory;
+import org.apache.flink.table.catalog.FunctionCatalog;
+import org.apache.flink.table.catalog.FunctionLanguage;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
+import org.apache.flink.table.functions.AsyncScalarFunction;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.FunctionIdentifier;
 import org.apache.flink.table.functions.FunctionKind;
@@ -35,6 +40,7 @@ import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.module.Module;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.FlinkTypeSystem;
+import org.apache.flink.table.planner.calcite.RexTableArgCall;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 import org.apache.flink.table.planner.functions.utils.UserDefinedFunctionUtils;
@@ -78,17 +84,19 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.CompiledPlanSerdeUtil.createJsonObjectReader;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.CompiledPlanSerdeUtil.createJsonObjectWriter;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.assertThatJsonContains;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.assertThatJsonDoesNotContain;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.testJsonRoundTrip;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.toJson;
-import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeUtil.createObjectReader;
-import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeUtil.createObjectWriter;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_CLASS;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_CATALOG;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_DATABASE;
@@ -104,15 +112,25 @@ public class RexNodeJsonSerdeTest {
             new FlinkTypeFactory(
                     RexNodeJsonSerdeTest.class.getClassLoader(), FlinkTypeSystem.INSTANCE);
     private static final String FUNCTION_NAME = "MyFunc";
+    private static final String ASYNC_FUNCTION_NAME = "MyAsyncFunc";
     private static final FunctionIdentifier FUNCTION_SYS_ID = FunctionIdentifier.of(FUNCTION_NAME);
     private static final FunctionIdentifier FUNCTION_CAT_ID =
             FunctionIdentifier.of(
                     ObjectIdentifier.of(DEFAULT_CATALOG, DEFAULT_DATABASE, FUNCTION_NAME));
+    private static final FunctionIdentifier ASYNC_FUNCTION_CAT_ID =
+            FunctionIdentifier.of(
+                    ObjectIdentifier.of(DEFAULT_CATALOG, DEFAULT_DATABASE, ASYNC_FUNCTION_NAME));
     private static final UnresolvedIdentifier UNRESOLVED_FUNCTION_CAT_ID =
             UnresolvedIdentifier.of(FUNCTION_CAT_ID.toList());
+    private static final UnresolvedIdentifier UNRESOLVED_ASYNC_FUNCTION_CAT_ID =
+            UnresolvedIdentifier.of(ASYNC_FUNCTION_CAT_ID.toList());
     private static final SerializableScalarFunction SER_UDF_IMPL = new SerializableScalarFunction();
+    private static final SerializableAsyncScalarFunction SER_ASYNC_UDF_IMPL =
+            new SerializableAsyncScalarFunction();
     private static final Class<SerializableScalarFunction> SER_UDF_CLASS =
             SerializableScalarFunction.class;
+    private static final Class<SerializableAsyncScalarFunction> SER_ASYNC_UDF_CLASS =
+            SerializableAsyncScalarFunction.class;
     private static final OtherSerializableScalarFunction SER_UDF_IMPL_OTHER =
             new OtherSerializableScalarFunction();
     private static final Class<OtherSerializableScalarFunction> SER_UDF_CLASS_OTHER =
@@ -122,7 +140,23 @@ public class RexNodeJsonSerdeTest {
     private static final NonSerializableFunctionDefinition NON_SER_FUNCTION_DEF_IMPL =
             new NonSerializableFunctionDefinition();
     private static final ContextResolvedFunction PERMANENT_FUNCTION =
-            ContextResolvedFunction.permanent(FUNCTION_CAT_ID, SER_UDF_IMPL);
+            ContextResolvedFunction.permanent(
+                    FUNCTION_CAT_ID,
+                    SER_UDF_IMPL,
+                    new CatalogFunctionImpl(
+                            SER_UDF_IMPL.getClass().getName(),
+                            FunctionLanguage.JAVA,
+                            Collections.emptyList(),
+                            Collections.emptyMap()));
+    private static final ContextResolvedFunction PERMANENT_FUNCTION_WITH_OPTIONS =
+            ContextResolvedFunction.permanent(
+                    FUNCTION_CAT_ID,
+                    SER_UDF_IMPL,
+                    new CatalogFunctionImpl(
+                            SER_UDF_IMPL.getClass().getName(),
+                            FunctionLanguage.JAVA,
+                            Collections.emptyList(),
+                            Map.of("option1", "value1", "option2", "value2")));
 
     @ParameterizedTest
     @MethodSource("testRexNodeSerde")
@@ -138,6 +172,12 @@ public class RexNodeJsonSerdeTest {
         // Serializable function
         testJsonRoundTrip(
                 createFunctionCall(serdeContext, ContextResolvedFunction.anonymous(SER_UDF_IMPL)),
+                RexNode.class);
+
+        // Serializable async function
+        testJsonRoundTrip(
+                createFunctionCall(
+                        serdeContext, ContextResolvedFunction.anonymous(SER_ASYNC_UDF_IMPL)),
                 RexNode.class);
 
         // Non-serializable function due to fields
@@ -310,7 +350,32 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.permanent(
-                                        FUNCTION_CAT_ID, SER_UDF_IMPL_OTHER));
+                                        FUNCTION_CAT_ID,
+                                        SER_UDF_IMPL_OTHER,
+                                        new CatalogFunctionImpl(
+                                                SER_UDF_IMPL_OTHER.getClass().getName(),
+                                                FunctionLanguage.JAVA,
+                                                Collections.emptyList(),
+                                                Collections.emptyMap())));
+            }
+
+            @Test
+            void withCatalogFunctionWithOptions() throws Exception {
+                final SerdeContext serdeContext = serdeContext(compilation, restore);
+                serdeContext
+                        .getFlinkContext()
+                        .getFunctionCatalog()
+                        .registerCatalogFunction(
+                                UNRESOLVED_FUNCTION_CAT_ID,
+                                FunctionDescriptor.forFunctionClass(SER_UDF_CLASS)
+                                        .option("option1", "value1")
+                                        .build(),
+                                false);
+
+                testJsonRoundTrip(
+                        serdeContext,
+                        createFunctionCall(serdeContext, PERMANENT_FUNCTION_WITH_OPTIONS),
+                        RexNode.class);
             }
         }
 
@@ -348,7 +413,10 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.temporary(
-                                        FUNCTION_CAT_ID, NON_SER_FUNCTION_DEF_IMPL));
+                                        FUNCTION_CAT_ID,
+                                        NON_SER_FUNCTION_DEF_IMPL,
+                                        new FunctionCatalog.InlineCatalogFunction(
+                                                NON_SER_FUNCTION_DEF_IMPL)));
             }
         }
 
@@ -383,7 +451,10 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.temporary(
-                                        FUNCTION_CAT_ID, NON_SER_FUNCTION_DEF_IMPL));
+                                        FUNCTION_CAT_ID,
+                                        NON_SER_FUNCTION_DEF_IMPL,
+                                        new FunctionCatalog.InlineCatalogFunction(
+                                                NON_SER_FUNCTION_DEF_IMPL)));
             }
 
             @Test
@@ -399,7 +470,13 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.permanent(
-                                        FUNCTION_CAT_ID, SER_UDF_IMPL_OTHER));
+                                        FUNCTION_CAT_ID,
+                                        SER_UDF_IMPL_OTHER,
+                                        new CatalogFunctionImpl(
+                                                SER_UDF_IMPL_OTHER.getClass().getName(),
+                                                FunctionLanguage.JAVA,
+                                                Collections.emptyList(),
+                                                Collections.emptyMap())));
             }
         }
     }
@@ -456,7 +533,38 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.temporary(
-                                        FUNCTION_CAT_ID, NON_SER_FUNCTION_DEF_IMPL));
+                                        FUNCTION_CAT_ID,
+                                        NON_SER_FUNCTION_DEF_IMPL,
+                                        new FunctionCatalog.InlineCatalogFunction(
+                                                NON_SER_FUNCTION_DEF_IMPL)));
+            }
+
+            @Test
+            void withCatalogFunctionWithOptions() throws Exception {
+                final SerdeContext serdeContext = serdeContext(compilation, restore);
+                serdeContext
+                        .getFlinkContext()
+                        .getFunctionCatalog()
+                        .registerCatalogFunction(
+                                UNRESOLVED_FUNCTION_CAT_ID,
+                                FunctionDescriptor.forFunctionClass(SER_UDF_CLASS)
+                                        .option("option1", "value1")
+                                        .build(),
+                                false);
+
+                assertThatThrownBy(
+                                () ->
+                                        testJsonRoundTrip(
+                                                serdeContext,
+                                                createFunctionCall(
+                                                        serdeContext,
+                                                        PERMANENT_FUNCTION_WITH_OPTIONS),
+                                                RexNode.class))
+                        .hasMessageContaining(
+                                "Catalog functions with custom options can"
+                                        + " not be serialized into the compiled plan. Please set the option"
+                                        + " 'table.plan.compile.catalog-objects'='IDENTIFIER' to only serialize"
+                                        + " the function's identifier.");
             }
         }
 
@@ -533,7 +641,10 @@ public class RexNodeJsonSerdeTest {
                 assertThat(actual)
                         .isEqualTo(
                                 ContextResolvedFunction.temporary(
-                                        FUNCTION_CAT_ID, NON_SER_FUNCTION_DEF_IMPL));
+                                        FUNCTION_CAT_ID,
+                                        NON_SER_FUNCTION_DEF_IMPL,
+                                        new FunctionCatalog.InlineCatalogFunction(
+                                                NON_SER_FUNCTION_DEF_IMPL)));
             }
         }
     }
@@ -684,7 +795,17 @@ public class RexNodeJsonSerdeTest {
                         FlinkSqlOperatorTable.HASH_CODE,
                         rexBuilder.makeInputRef(FACTORY.createSqlType(SqlTypeName.INTEGER), 1)),
                 rexBuilder.makePatternFieldRef(
-                        "test", FACTORY.createSqlType(SqlTypeName.INTEGER), 0));
+                        "test", FACTORY.createSqlType(SqlTypeName.INTEGER), 0),
+                new RexTableArgCall(
+                        FACTORY.createStructType(
+                                StructKind.PEEK_FIELDS_NO_EXPAND,
+                                Arrays.asList(
+                                        FACTORY.createSqlType(SqlTypeName.VARCHAR),
+                                        FACTORY.createSqlType(SqlTypeName.INTEGER)),
+                                Arrays.asList("f1", "f2")),
+                        0,
+                        new int[] {1},
+                        new int[] {0}));
     }
 
     // --------------------------------------------------------------------------------------------
@@ -731,7 +852,17 @@ public class RexNodeJsonSerdeTest {
         serdeContext
                 .getFlinkContext()
                 .getFunctionCatalog()
-                .registerCatalogFunction(UNRESOLVED_FUNCTION_CAT_ID, SER_UDF_CLASS, false);
+                .registerCatalogFunction(
+                        UNRESOLVED_FUNCTION_CAT_ID,
+                        FunctionDescriptor.forFunctionClass(SER_UDF_CLASS).build(),
+                        false);
+        serdeContext
+                .getFlinkContext()
+                .getFunctionCatalog()
+                .registerCatalogFunction(
+                        UNRESOLVED_ASYNC_FUNCTION_CAT_ID,
+                        FunctionDescriptor.forFunctionClass(SER_ASYNC_UDF_CLASS).build(),
+                        false);
         return serdeContext;
     }
 
@@ -747,7 +878,10 @@ public class RexNodeJsonSerdeTest {
         serdeContext
                 .getFlinkContext()
                 .getFunctionCatalog()
-                .registerCatalogFunction(UNRESOLVED_FUNCTION_CAT_ID, SER_UDF_CLASS_OTHER, false);
+                .registerCatalogFunction(
+                        UNRESOLVED_FUNCTION_CAT_ID,
+                        FunctionDescriptor.forFunctionClass(SER_UDF_CLASS_OTHER).build(),
+                        false);
     }
 
     private static void registerTemporaryFunction(SerdeContext serdeContext) {
@@ -767,15 +901,15 @@ public class RexNodeJsonSerdeTest {
 
     private JsonNode serializePermanentFunction(SerdeContext serdeContext) throws Exception {
         final byte[] actualSerialized =
-                createObjectWriter(serdeContext)
+                createJsonObjectWriter(serdeContext)
                         .writeValueAsBytes(createFunctionCall(serdeContext, PERMANENT_FUNCTION));
-        return createObjectReader(serdeContext).readTree(actualSerialized);
+        return createJsonObjectReader(serdeContext).readTree(actualSerialized);
     }
 
     private ContextResolvedFunction deserialize(SerdeContext serdeContext, JsonNode node)
             throws IOException {
         final RexNode actualDeserialized =
-                createObjectReader(serdeContext).readValue(node, RexNode.class);
+                createJsonObjectReader(serdeContext).readValue(node, RexNode.class);
         return ((BridgingSqlFunction) ((RexCall) actualDeserialized).getOperator())
                 .getResolvedFunction();
     }
@@ -831,6 +965,15 @@ public class RexNodeJsonSerdeTest {
         @Override
         public boolean equals(Object obj) {
             return obj instanceof OtherSerializableScalarFunction;
+        }
+    }
+
+    /** Serializable async function. */
+    public static class SerializableAsyncScalarFunction extends AsyncScalarFunction {
+
+        @SuppressWarnings("unused")
+        public void eval(CompletableFuture<String> res, Integer i) {
+            throw new UnsupportedOperationException();
         }
     }
 

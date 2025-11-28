@@ -20,10 +20,11 @@ package org.apache.flink.runtime.io.network.buffer;
 
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.runtime.event.AbstractEvent;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
 import org.apache.flink.runtime.io.network.api.EndOfData;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
-import org.apache.flink.runtime.io.network.partition.consumer.EndOfChannelStateEvent;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfOutputChannelStateEvent;
 
 import org.apache.flink.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.flink.shaded.netty4.io.netty.buffer.ByteBufAllocator;
@@ -328,7 +329,19 @@ public interface Buffer {
         END_OF_PARTITION(false, true, false, false, false, false),
 
         /** Contains the metadata used during a recovery process. */
-        RECOVERY_METADATA(false, true, false, false, false, false);
+        RECOVERY_METADATA(false, true, false, false, false, false),
+
+        /**
+         * {@link #ALIGNED_WATERMARK_EVENT} indicates that this buffer represents a serialized
+         * {@link WatermarkEvent}, which needs to be aligned.
+         */
+        ALIGNED_WATERMARK_EVENT(false, true, true, false, false, false),
+
+        /**
+         * {@link #UNALIGNED_WATERMARK_EVENT} indicates that this buffer represents a serialized
+         * {@link WatermarkEvent}, which does not need to be aligned.
+         */
+        UNALIGNED_WATERMARK_EVENT(false, true, false, false, false, false);
 
         private final boolean isBuffer;
         private final boolean isEvent;
@@ -395,12 +408,18 @@ public interface Buffer {
         public static DataType getDataType(AbstractEvent event, boolean hasPriority) {
             if (hasPriority) {
                 return PRIORITIZED_EVENT_BUFFER;
-            } else if (event instanceof EndOfChannelStateEvent) {
+            } else if (event instanceof EndOfOutputChannelStateEvent) {
                 return RECOVERY_COMPLETION;
             } else if (event instanceof EndOfData) {
                 return END_OF_DATA;
             } else if (event instanceof EndOfPartitionEvent) {
                 return END_OF_PARTITION;
+            } else if (event instanceof WatermarkEvent) {
+                if (((WatermarkEvent) event).isAligned()) {
+                    return ALIGNED_WATERMARK_EVENT;
+                } else {
+                    return UNALIGNED_WATERMARK_EVENT;
+                }
             } else if (!(event instanceof CheckpointBarrier)) {
                 return EVENT_BUFFER;
             }

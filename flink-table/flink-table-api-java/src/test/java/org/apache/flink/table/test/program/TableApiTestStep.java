@@ -18,9 +18,13 @@
 
 package org.apache.flink.table.test.program;
 
+import org.apache.flink.table.api.Model;
+import org.apache.flink.table.api.ModelDescriptor;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
+import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.types.AbstractDataType;
 
 import java.util.function.Function;
@@ -49,6 +53,17 @@ public class TableApiTestStep implements TestStep {
                     }
 
                     @Override
+                    public Table fromCall(String path, Object... arguments) {
+                        return env.fromCall(path, arguments);
+                    }
+
+                    @Override
+                    public Table fromCall(
+                            Class<? extends UserDefinedFunction> function, Object... arguments) {
+                        return env.fromCall(function, arguments);
+                    }
+
+                    @Override
                     public Table fromValues(Object... values) {
                         return env.fromValues(values);
                     }
@@ -62,6 +77,16 @@ public class TableApiTestStep implements TestStep {
                     public Table sqlQuery(String query) {
                         return env.sqlQuery(query);
                     }
+
+                    @Override
+                    public Model fromModel(String modelPath) {
+                        return env.fromModel(modelPath);
+                    }
+
+                    @Override
+                    public Model from(ModelDescriptor modelDescriptor) {
+                        return env.fromModel(modelDescriptor);
+                    }
                 });
     }
 
@@ -72,7 +97,8 @@ public class TableApiTestStep implements TestStep {
 
     public TableResult applyAsSql(TableEnvironment env) {
         final Table table = toTable(env);
-        final String query = table.getQueryOperation().asSerializableString();
+        final String query =
+                table.getQueryOperation().asSerializableString(DefaultSqlFactory.INSTANCE);
         return env.executeSql(String.format("INSERT INTO %s %s", sinkName, query));
     }
 
@@ -83,6 +109,12 @@ public class TableApiTestStep implements TestStep {
         /** See {@link TableEnvironment#from(String)}. */
         Table from(String path);
 
+        /** See {@link TableEnvironment#fromCall(String, Object...)}. */
+        Table fromCall(String path, Object... arguments);
+
+        /** See {@link TableEnvironment#fromCall(Class, Object...)}. */
+        Table fromCall(Class<? extends UserDefinedFunction> function, Object... arguments);
+
         /** See {@link TableEnvironment#fromValues(Object...)}. */
         Table fromValues(Object... values);
 
@@ -91,5 +123,11 @@ public class TableApiTestStep implements TestStep {
 
         /** See {@link TableEnvironment#sqlQuery(String)}. */
         Table sqlQuery(String query);
+
+        /** See {@link TableEnvironment#fromModel(String)}. */
+        Model fromModel(String modelPath);
+
+        /** See {@link TableEnvironment#fromModel(ModelDescriptor)}. */
+        Model from(ModelDescriptor modelDescriptor);
     }
 }

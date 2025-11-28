@@ -28,7 +28,7 @@ under the License.
 
 # 导入 Flink 到 IDE 中
 
-以下章节描述了如何将 Flink 项目导入到 IDE 中以进行 Flink 本身的源码开发。有关 Flink 程序编写的信息，请参阅 [Java API]({{< ref "docs/dev/configuration/overview" >}}) 和 [Scala API]({{< ref "docs/dev/configuration/overview" >}}) 快速入门指南。
+以下章节描述了如何将 Flink 项目导入到 IDE 中以进行 Flink 本身的源码开发。有关 Flink 程序编写的信息，请参阅 [Java API]({{< ref "docs/dev/configuration/overview" >}}) 快速入门指南。
 
 {{< hint info >}}
 每当你的 IDE 无法正常工作时，请优先尝试使用 Maven 命令行（`mvn clean package -DskipTests`），因为它可能是由于你的 IDE 中存在错误或未正确设置。
@@ -159,7 +159,7 @@ IntelliJ 使用 Checkstyle-IDEA 插件在 IDE 中支持 checkstyle。
 
 本节列出了开发人员过去使用 IntelliJ 时遇到的问题：
 
-- 编译失败 `invalid flag: --add-exports=java.base/sun.net.util=ALL-UNNAMED`
+- 编译失败 `invalid flag: --add-exports=java.management/sun.management=ALL-UNNAMED`
 
 这意味着 IntelliJ 仍激活了 `Java 11` 配置文件，尽管使用了较旧的 JDK。解决方法：打开 Maven 工具窗口（View → tool Windows → Maven），取消选中 `Java 11` 配置文件并重新导入项目。
 

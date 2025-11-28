@@ -27,7 +27,7 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.util.bash.BashJavaUtils;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Sets;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Sets;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -180,8 +180,7 @@ class BashJavaUtilsITCase extends JavaBashTestBase {
                         "env:",
                         "  java:",
                         "    opts:",
-                        "      all: --add-exports=java.base/sun.net.util=ALL-UNNAMED "
-                                + "--add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED "
+                        "      all: --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED "
                                 + "--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED "
                                 + "--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED "
                                 + "--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED "

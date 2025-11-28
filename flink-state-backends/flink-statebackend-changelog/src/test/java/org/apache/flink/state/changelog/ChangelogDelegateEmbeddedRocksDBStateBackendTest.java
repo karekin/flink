@@ -33,6 +33,7 @@ import org.apache.flink.state.rocksdb.EmbeddedRocksDBStateBackend;
 import org.apache.flink.state.rocksdb.EmbeddedRocksDBStateBackendTest;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,11 +42,22 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+
 /** Tests for {@link ChangelogStateBackend} delegating {@link EmbeddedRocksDBStateBackend}. */
 public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
         extends EmbeddedRocksDBStateBackendTest {
 
     @TempDir private Path temp;
+
+    @BeforeEach
+    public void setup() throws IOException {
+        assumeFalse(
+                useHeapTimer,
+                "The combination RocksDB state backend with heap-based timers currently "
+                        + "does NOT support asynchronous snapshots for the timers state. "
+                        + "Thus we disable the changelog test for now.");
+    }
 
     @Override
     protected TestTaskStateManager getTestTaskStateManager() throws IOException {
@@ -60,11 +72,6 @@ public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
     @Override
     protected boolean supportsMetaInfoVerification() {
         return false;
-    }
-
-    @Override
-    protected boolean isSafeToReuseKVState() {
-        return true;
     }
 
     @TestTemplate
@@ -127,5 +134,13 @@ public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
     @Override
     protected boolean checkMetrics() {
         return false;
+    }
+
+    // Follow https://issues.apache.org/jira/browse/FLINK-38144
+    @Override
+    @TestTemplate
+    @Disabled("Currently, ChangelogStateBackend does not support null values for map state")
+    public void testMapStateWithNullValue() throws Exception {
+        super.testMapStateWithNullValue();
     }
 }

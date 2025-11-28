@@ -24,6 +24,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
@@ -35,7 +36,7 @@ import org.apache.flink.runtime.io.network.buffer.BufferBuilderTestUtils;
 import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.CheckpointableInput;
-import org.apache.flink.runtime.io.network.partition.consumer.EndOfChannelStateEvent;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfOutputChannelStateEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.InputGate;
 import org.apache.flink.runtime.io.network.partition.consumer.StreamTestSingleInputGate;
 import org.apache.flink.runtime.mailbox.SyncMailboxExecutor;
@@ -228,9 +229,9 @@ class StreamTaskNetworkInputTest {
 
         inputGate.sendElement(new StreamRecord<>(42L), 0);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.MORE_AVAILABLE);
-        inputGate.sendEvent(EndOfChannelStateEvent.INSTANCE, 0);
+        inputGate.sendEvent(EndOfOutputChannelStateEvent.INSTANCE, 0);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.MORE_AVAILABLE);
-        inputGate.sendEvent(EndOfChannelStateEvent.INSTANCE, 1);
+        inputGate.sendEvent(EndOfOutputChannelStateEvent.INSTANCE, 1);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.END_OF_RECOVERY);
     }
 
@@ -453,6 +454,9 @@ class StreamTaskNetworkInputTest {
 
         @Override
         public void emitRecordAttributes(RecordAttributes recordAttributes) {}
+
+        @Override
+        public void emitWatermark(WatermarkEvent watermark) {}
     }
 
     private static class VerifyRecordsDataOutput<T> extends NoOpDataOutput<T> {

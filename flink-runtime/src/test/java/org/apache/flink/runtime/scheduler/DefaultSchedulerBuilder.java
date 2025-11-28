@@ -43,12 +43,13 @@ import org.apache.flink.runtime.io.network.partition.NoOpJobMasterPartitionTrack
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobmaster.DefaultExecutionDeploymentTracker;
+import org.apache.flink.runtime.jobmaster.ExecutionDeploymentTracker;
 import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.scheduler.adaptivebatch.AdaptiveBatchScheduler;
 import org.apache.flink.runtime.scheduler.adaptivebatch.AdaptiveBatchSchedulerFactory;
 import org.apache.flink.runtime.scheduler.adaptivebatch.BatchJobRecoveryHandler;
-import org.apache.flink.runtime.scheduler.adaptivebatch.BlockingResultInfo;
+import org.apache.flink.runtime.scheduler.adaptivebatch.BlockingInputInfo;
 import org.apache.flink.runtime.scheduler.adaptivebatch.DummyBatchJobRecoveryHandler;
 import org.apache.flink.runtime.scheduler.adaptivebatch.NonAdaptiveExecutionPlanSchedulingContext;
 import org.apache.flink.runtime.scheduler.adaptivebatch.VertexParallelismAndInputInfosDecider;
@@ -122,6 +123,8 @@ public class DefaultSchedulerBuilder {
     private InputConsumableDecider.Factory inputConsumableDeciderFactory =
             AllFinishedInputConsumableDecider.Factory.INSTANCE;
     private BatchJobRecoveryHandler jobRecoveryHandler = new DummyBatchJobRecoveryHandler();
+    private ExecutionDeploymentTracker executionDeploymentTracker =
+            new DefaultExecutionDeploymentTracker();
 
     public DefaultSchedulerBuilder(
             JobGraph jobGraph,
@@ -301,6 +304,12 @@ public class DefaultSchedulerBuilder {
         return this;
     }
 
+    public DefaultSchedulerBuilder setExecutionDeploymentTracker(
+            ExecutionDeploymentTracker executionDeploymentTracker) {
+        this.executionDeploymentTracker = executionDeploymentTracker;
+        return this;
+    }
+
     public DefaultScheduler build() throws Exception {
         return new DefaultScheduler(
                 log,
@@ -361,12 +370,13 @@ public class DefaultSchedulerBuilder {
                 futureExecutor,
                 userCodeLoader,
                 checkpointRecoveryFactory,
+                checkpointCleaner,
                 rpcTimeout,
                 blobWriter,
                 jobManagerJobMetricGroup,
                 shuffleMaster,
                 partitionTracker,
-                new DefaultExecutionDeploymentTracker(),
+                executionDeploymentTracker,
                 System.currentTimeMillis(),
                 mainThreadExecutor,
                 jobStatusListener,
@@ -389,7 +399,7 @@ public class DefaultSchedulerBuilder {
         return new DefaultExecutionGraphFactory(
                 jobMasterConfiguration,
                 userCodeLoader,
-                new DefaultExecutionDeploymentTracker(),
+                executionDeploymentTracker,
                 futureExecutor,
                 ioExecutor,
                 rpcTimeout,
@@ -415,7 +425,7 @@ public class DefaultSchedulerBuilder {
             @Override
             public ParallelismAndInputInfos decideParallelismAndInputInfosForVertex(
                     JobVertexID jobVertexId,
-                    List<BlockingResultInfo> consumedResults,
+                    List<BlockingInputInfo> consumedResults,
                     int vertexInitialParallelism,
                     int vertexMinParallelism,
                     int vertexMaxParallelism) {

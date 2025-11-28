@@ -20,7 +20,6 @@ package org.apache.flink.table.api.internal;
 
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.typeinfo.SqlTimeTypeInfo;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Expressions;
 import org.apache.flink.table.api.JsonExistsOnError;
@@ -149,6 +148,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MOD;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.NOT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.NOT_BETWEEN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.NOT_EQUALS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OBJECT_UPDATE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OR;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_ASC;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_DESC;
@@ -249,6 +249,36 @@ public abstract class BaseExpressions<InType, OutType> {
                                         Stream.of(toExpr(), ApiExpressionUtils.valueLiteral(name)),
                                         Stream.of(extraNames).map(ApiExpressionUtils::valueLiteral))
                                 .toArray(Expression[]::new)));
+    }
+
+    /**
+     * Converts this expression into a named argument.
+     *
+     * <p>If the function declares a static signature (usually indicated by the "=>" assignment
+     * operator), the framework is able to reorder named arguments and consider optional arguments
+     * accordingly, before passing them into the function call.
+     *
+     * <p>Note: Not every function supports named arguments. Named arguments are not available for
+     * signatures that are overloaded, use varargs, or any other kind of input type strategy.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * table.select(
+     *   Expressions.call(
+     *     "MyFunction",
+     *     $("my_column").asArgument("input"),
+     *     lit(42).asArgument("threshold")
+     *   )
+     * )
+     * }</pre>
+     */
+    public OutType asArgument(String name) {
+        return toApiSpecificExpression(
+                ApiExpressionUtils.unresolvedCall(
+                        BuiltInFunctionDefinitions.ASSIGNMENT,
+                        ApiExpressionUtils.valueLiteral(name),
+                        toExpr()));
     }
 
     /**
@@ -614,19 +644,6 @@ public abstract class BaseExpressions<InType, OutType> {
      */
     public OutType tryCast(DataType toType) {
         return toApiSpecificExpression(unresolvedCall(TRY_CAST, toExpr(), typeLiteral(toType)));
-    }
-
-    /**
-     * @deprecated This method will be removed in future versions as it uses the old type system. It
-     *     is recommended to use {@link #cast(DataType)} instead which uses the new type system
-     *     based on {@link org.apache.flink.table.api.DataTypes}. Please make sure to use either the
-     *     old or the new type system consistently to avoid unintended behavior. See the website
-     *     documentation for more information.
-     */
-    @Deprecated
-    public OutType cast(TypeInformation<?> toType) {
-        return toApiSpecificExpression(
-                unresolvedCall(CAST, toExpr(), typeLiteral(fromLegacyInfoToDataType(toType))));
     }
 
     /** Specifies ascending order of an expression i.e. a field for orderBy unresolvedCall. */
@@ -2471,5 +2488,33 @@ public abstract class BaseExpressions<InType, OutType> {
                         toExpr(),
                         objectToExpression(percentage),
                         objectToExpression(frequency)));
+    }
+
+    /**
+     * Updates existing fields in a structured object by providing key-value pairs.
+     *
+     * <p>This function takes a structured object and updates specified fields with new values. The
+     * keys must be string literals that correspond to existing fields in the structured type. If a
+     * key does not exist in the input object, an exception will be thrown.
+     *
+     * <p>The function expects alternating key-value pairs where keys are field names (non-null
+     * strings) and values are the new values for those fields. At least one key-value pair must be
+     * provided.
+     *
+     * <p>The result type is the same structured type class, with the specified fields updated to
+     * their new values.
+     *
+     * @param kv key-value pairs where even-indexed elements are field names (strings) and
+     *     odd-indexed elements are the new values for those fields
+     * @return expression representing a new structured object with updated field values
+     */
+    public OutType objectUpdate(InType... kv) {
+        final Expression[] expressions =
+                Stream.concat(
+                                Stream.of(toExpr()),
+                                Stream.of(kv).map(ApiExpressionUtils::objectToExpression))
+                        .toArray(Expression[]::new);
+        return toApiSpecificExpression(
+                ApiExpressionUtils.unresolvedCall(OBJECT_UPDATE, expressions));
     }
 }

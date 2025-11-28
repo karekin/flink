@@ -22,7 +22,6 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.checkpoint.AbstractCheckpointStats;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsHistory;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
-import org.apache.flink.runtime.checkpoint.StatsSummary;
 import org.apache.flink.runtime.checkpoint.SubtaskStateStats;
 import org.apache.flink.runtime.checkpoint.TaskStateStats;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
@@ -36,16 +35,17 @@ import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.MessageHeaders;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 import org.apache.flink.runtime.rest.messages.checkpoints.CheckpointIdPathParameter;
-import org.apache.flink.runtime.rest.messages.checkpoints.StatsSummaryDto;
 import org.apache.flink.runtime.rest.messages.checkpoints.SubtaskCheckpointStatistics;
 import org.apache.flink.runtime.rest.messages.checkpoints.TaskCheckpointMessageParameters;
 import org.apache.flink.runtime.rest.messages.checkpoints.TaskCheckpointStatisticsWithSubtaskDetails;
+import org.apache.flink.runtime.rest.messages.util.stats.StatsSummaryDto;
+import org.apache.flink.runtime.util.stats.StatsSummary;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.OnlyExecutionGraphJsonArchivist;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 
-import org.apache.flink.shaded.guava32.com.google.common.cache.Cache;
+import org.apache.flink.shaded.guava33.com.google.common.cache.Cache;
 
 import java.io.IOException;
 import java.time.Duration;

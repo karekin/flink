@@ -27,12 +27,15 @@ import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.api.config.MaterializedTableConfigOptions;
 import org.apache.flink.table.api.internal.TableEnvironmentImpl;
 import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.catalog.exceptions.DatabaseAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotEmptyException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
+import org.apache.flink.table.catalog.exceptions.ModelAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.ModelNotExistException;
 import org.apache.flink.table.catalog.exceptions.PartitionNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableAlreadyExistException;
@@ -48,9 +51,14 @@ import org.apache.flink.table.catalog.listener.CreateTableEvent;
 import org.apache.flink.table.catalog.listener.DropDatabaseEvent;
 import org.apache.flink.table.catalog.listener.DropModelEvent;
 import org.apache.flink.table.catalog.listener.DropTableEvent;
+import org.apache.flink.table.delegation.Parser;
 import org.apache.flink.table.delegation.Planner;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
+import org.apache.flink.table.expressions.SqlFactory;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver.ExpressionResolverBuilder;
 import org.apache.flink.table.factories.FactoryUtil;
+import org.apache.flink.table.operations.Operation;
+import org.apache.flink.table.operations.QueryOperation;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StringUtils;
 
@@ -59,6 +67,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -73,9 +82,11 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.lang.String.format;
+import static org.apache.flink.table.api.config.MaterializedTableConfigOptions.MATERIALIZED_TABLE_FRESHNESS_THRESHOLD;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -104,25 +115,29 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     private @Nullable String currentDatabaseName;
 
     private DefaultSchemaResolver schemaResolver;
+    private Parser parser;
 
     // The name of the built-in catalog
     private final String builtInCatalogName;
 
     private final DataTypeFactory typeFactory;
 
-    private final ManagedTableListener managedTableListener;
-
     private final List<CatalogModificationListener> catalogModificationListeners;
 
     private final CatalogStoreHolder catalogStoreHolder;
+
+    private SqlFactory sqlFactory;
+
+    private final MaterializedTableEnricher materializedTableEnricher;
 
     private CatalogManager(
             String defaultCatalogName,
             Catalog defaultCatalog,
             DataTypeFactory typeFactory,
-            ManagedTableListener managedTableListener,
             List<CatalogModificationListener> catalogModificationListeners,
-            CatalogStoreHolder catalogStoreHolder) {
+            CatalogStoreHolder catalogStoreHolder,
+            SqlFactory sqlFactory,
+            MaterializedTableEnricher materializedTableEnricher) {
         checkArgument(
                 !StringUtils.isNullOrWhitespaceOnly(defaultCatalogName),
                 "Default catalog name cannot be null or empty");
@@ -140,10 +155,13 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         builtInCatalogName = defaultCatalogName;
 
         this.typeFactory = typeFactory;
-        this.managedTableListener = managedTableListener;
         this.catalogModificationListeners = catalogModificationListeners;
 
         this.catalogStoreHolder = catalogStoreHolder;
+
+        this.sqlFactory = sqlFactory;
+        this.materializedTableEnricher =
+                checkNotNull(materializedTableEnricher, "MaterializedTableEnricher cannot be null");
     }
 
     @VisibleForTesting
@@ -178,6 +196,10 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         private List<CatalogModificationListener> catalogModificationListeners =
                 Collections.emptyList();
         private CatalogStoreHolder catalogStoreHolder;
+
+        private SqlFactory sqlFactory = DefaultSqlFactory.INSTANCE;
+
+        private MaterializedTableEnricher materializedTableEnricher;
 
         public Builder classLoader(ClassLoader classLoader) {
             this.classLoader = classLoader;
@@ -216,6 +238,17 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
             return this;
         }
 
+        public Builder sqlFactory(SqlFactory sqlFactory) {
+            this.sqlFactory = checkNotNull(sqlFactory);
+            return this;
+        }
+
+        public Builder materializedTableEnricher(
+                MaterializedTableEnricher materializedTableEnricher) {
+            this.materializedTableEnricher = materializedTableEnricher;
+            return this;
+        }
+
         public CatalogManager build() {
             checkNotNull(classLoader, "Class loader cannot be null");
             checkNotNull(config, "Config cannot be null");
@@ -231,9 +264,31 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                     executionConfig == null
                                             ? null
                                             : executionConfig.getSerializerConfig()),
-                    new ManagedTableListener(classLoader, config),
                     catalogModificationListeners,
-                    catalogStoreHolder);
+                    catalogStoreHolder,
+                    sqlFactory,
+                    materializedTableEnricher != null
+                            ? materializedTableEnricher
+                            : createDefaultMaterializedTableEnricher());
+        }
+
+        private MaterializedTableEnricher createDefaultMaterializedTableEnricher() {
+            final Duration defaultDurationContinuous =
+                    catalogStoreHolder
+                            .config()
+                            .get(
+                                    MaterializedTableConfigOptions
+                                            .MATERIALIZED_TABLE_DEFAULT_FRESHNESS_CONTINUOUS);
+            final Duration defaultDurationFull =
+                    catalogStoreHolder
+                            .config()
+                            .get(
+                                    MaterializedTableConfigOptions
+                                            .MATERIALIZED_TABLE_DEFAULT_FRESHNESS_FULL);
+            final Duration freshnessThreshold =
+                    catalogStoreHolder.config().get(MATERIALIZED_TABLE_FRESHNESS_THRESHOLD);
+            return DefaultMaterializedTableEnricher.create(
+                    defaultDurationContinuous, defaultDurationFull, freshnessThreshold);
         }
     }
 
@@ -287,9 +342,12 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
      * @see TableEnvironmentImpl#create(EnvironmentSettings)
      */
     public void initSchemaResolver(
-            boolean isStreamingMode, ExpressionResolverBuilder expressionResolverBuilder) {
+            boolean isStreamingMode,
+            ExpressionResolverBuilder expressionResolverBuilder,
+            Parser parser) {
         this.schemaResolver =
                 new DefaultSchemaResolver(isStreamingMode, typeFactory, expressionResolverBuilder);
+        this.parser = parser;
     }
 
     /** Returns a {@link SchemaResolver} for creating {@link ResolvedSchema} from {@link Schema}. */
@@ -300,6 +358,14 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     /** Returns a factory for creating fully resolved data types that can be used for planning. */
     public DataTypeFactory getDataTypeFactory() {
         return typeFactory;
+    }
+
+    public SqlFactory getSqlFactory() {
+        return sqlFactory;
+    }
+
+    public void setSqlFactory(SqlFactory sqlFactory) {
+        this.sqlFactory = checkNotNull(sqlFactory);
     }
 
     /**
@@ -328,13 +394,12 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 throw new CatalogException(format("Catalog %s already exists.", catalogName));
             }
         } else {
-            // Store the catalog in the catalog store
-            catalogStoreHolder.catalogStore().storeCatalog(catalogName, catalogDescriptor);
-
             // Initialize and store the catalog in memory
             Catalog catalog = initCatalog(catalogName, catalogDescriptor);
             catalog.open();
             catalogs.put(catalogName, catalog);
+            // Store the catalog in the catalog store
+            catalogStoreHolder.catalogStore().storeCatalog(catalogName, catalogDescriptor);
         }
     }
 
@@ -682,7 +747,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         return getTable(objectIdentifier)
                 .orElseThrow(
                         () ->
-                                new TableException(
+                                new ValidationException(
                                         String.format(
                                                 "Cannot find table '%s' in any of the catalogs %s, nor as a temporary table.",
                                                 objectIdentifier, listCatalogs())));
@@ -722,7 +787,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 if (timestamp != null) {
                     table = currentCatalog.getTable(objectPath, timestamp);
                     if (table.getTableKind() == TableKind.VIEW) {
-                        throw new TableException(
+                        throw new ValidationException(
                                 String.format(
                                         "%s is a view, but time travel is not supported for view.",
                                         objectIdentifier.asSummaryString()));
@@ -879,6 +944,36 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     }
 
     /**
+     * Returns an array of names of materialized tables registered in the namespace of the current
+     * catalog and database.
+     *
+     * @return names of registered materialized tables
+     */
+    public Set<String> listMaterializedTables() {
+        return listMaterializedTables(getCurrentCatalog(), getCurrentDatabase());
+    }
+
+    /**
+     * Returns an array of names of materialized tables registered in the namespace of the given
+     * catalog and database.
+     *
+     * @return names of registered materialized tables
+     */
+    public Set<String> listMaterializedTables(String catalogName, String databaseName) {
+        Catalog catalog = getCatalogOrThrowException(catalogName);
+        if (catalog == null) {
+            throw new ValidationException(String.format("Catalog %s does not exist", catalogName));
+        }
+
+        try {
+            return new HashSet<>(catalog.listMaterializedTables(databaseName));
+        } catch (DatabaseNotExistException e) {
+            throw new ValidationException(
+                    String.format("Database %s does not exist", databaseName), e);
+        }
+    }
+
+    /**
      * Lists all available schemas in the root of the catalog manager. It is not equivalent to
      * listing all catalogs as it includes also different catalog parts of the temporary objects.
      *
@@ -1012,23 +1107,25 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
      * @param table The table to put in the given path.
      * @param objectIdentifier The fully qualified path where to put the table.
      * @param ignoreIfExists If false exception will be thrown if a table exists in the given path.
+     * @return true if table was created in the given path, false if a table already exists in the
+     *     given path.
      */
-    public void createTable(
+    public boolean createTable(
             CatalogBaseTable table, ObjectIdentifier objectIdentifier, boolean ignoreIfExists) {
+        final boolean result;
+        if (ignoreIfExists) {
+            final Optional<CatalogBaseTable> resultOpt = getUnresolvedTable(objectIdentifier);
+            result = resultOpt.isEmpty();
+        } else {
+            result = true;
+        }
         execute(
                 (catalog, path) -> {
                     ResolvedCatalogBaseTable<?> resolvedTable = resolveCatalogBaseTable(table);
-                    ResolvedCatalogBaseTable<?> resolvedListenedTable =
-                            managedTableListener.notifyTableCreation(
-                                    catalog,
-                                    objectIdentifier,
-                                    resolvedTable,
-                                    false,
-                                    ignoreIfExists);
 
-                    catalog.createTable(path, resolvedListenedTable, ignoreIfExists);
-                    if (resolvedListenedTable instanceof CatalogTable
-                            || resolvedListenedTable instanceof CatalogMaterializedTable) {
+                    catalog.createTable(path, resolvedTable, ignoreIfExists);
+                    if (resolvedTable instanceof CatalogTable
+                            || resolvedTable instanceof CatalogMaterializedTable) {
                         catalogModificationListeners.forEach(
                                 listener ->
                                         listener.onEvent(
@@ -1037,7 +1134,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                                                 objectIdentifier.getCatalogName(),
                                                                 catalog),
                                                         objectIdentifier,
-                                                        resolvedListenedTable,
+                                                        resolvedTable,
                                                         ignoreIfExists,
                                                         false)));
                     }
@@ -1045,6 +1142,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 objectIdentifier,
                 false,
                 "CreateTable");
+        return result;
     }
 
     /**
@@ -1073,20 +1171,13 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                         ResolvedCatalogBaseTable<?> resolvedTable = resolveCatalogBaseTable(table);
                         Catalog catalog =
                                 getCatalog(objectIdentifier.getCatalogName()).orElse(null);
-                        ResolvedCatalogBaseTable<?> resolvedListenedTable =
-                                managedTableListener.notifyTableCreation(
-                                        catalog,
-                                        objectIdentifier,
-                                        resolvedTable,
-                                        true,
-                                        ignoreIfExists);
 
                         if (listener.isPresent()) {
                             return listener.get()
                                     .onCreateTemporaryTable(
-                                            objectIdentifier.toObjectPath(), resolvedListenedTable);
+                                            objectIdentifier.toObjectPath(), resolvedTable);
                         }
-                        if (resolvedListenedTable instanceof CatalogTable) {
+                        if (resolvedTable instanceof CatalogTable) {
                             catalogModificationListeners.forEach(
                                     l ->
                                             l.onEvent(
@@ -1096,33 +1187,13 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                                                             .getCatalogName(),
                                                                     catalog),
                                                             objectIdentifier,
-                                                            resolvedListenedTable,
+                                                            resolvedTable,
                                                             ignoreIfExists,
                                                             true)));
                         }
-                        return resolvedListenedTable;
+                        return resolvedTable;
                     }
                 });
-    }
-
-    /**
-     * Resolve dynamic options for compact operation on a Flink's managed table.
-     *
-     * @param origin The resolved managed table with enriched options.
-     * @param tableIdentifier The fully qualified path of the managed table.
-     * @param partitionSpec User-specified unresolved partition spec.
-     * @return dynamic options which describe the metadata of compaction
-     */
-    public Map<String, String> resolveCompactManagedTableOptions(
-            ResolvedCatalogTable origin,
-            ObjectIdentifier tableIdentifier,
-            CatalogPartitionSpec partitionSpec) {
-        return managedTableListener.notifyTableCompaction(
-                catalogs.getOrDefault(tableIdentifier.getCatalogName(), null),
-                tableIdentifier,
-                origin,
-                partitionSpec,
-                false);
     }
 
     /**
@@ -1167,8 +1238,6 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
             Catalog catalog = getCatalog(objectIdentifier.getCatalogName()).orElse(null);
             ResolvedCatalogBaseTable<?> resolvedTable = resolveCatalogBaseTable(catalogBaseTable);
-            managedTableListener.notifyTableDrop(
-                    catalog, objectIdentifier, resolvedTable, true, ignoreIfNotExists);
 
             temporaryTables.remove(objectIdentifier);
             if (isDropTable) {
@@ -1346,8 +1415,6 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                     (catalog, path) -> {
                         ResolvedCatalogBaseTable<?> resolvedTable =
                                 resolveCatalogBaseTable(resultOpt.get());
-                        managedTableListener.notifyTableDrop(
-                                catalog, objectIdentifier, resolvedTable, false, ignoreIfNotExists);
 
                         catalog.dropTable(path, ignoreIfNotExists);
                         if (kind != TableKind.VIEW) {
@@ -1420,7 +1487,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         return getModel(objectIdentifier)
                 .orElseThrow(
                         () ->
-                                new TableException(
+                                new ValidationException(
                                         String.format(
                                                 "Cannot find model '%s' in any of the catalogs %s.",
                                                 objectIdentifier, listCatalogs())));
@@ -1437,8 +1504,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     }
 
     /**
-     * Returns an array of names of all models registered in the namespace of the current catalog
-     * and database.
+     * Returns a set of names of all models registered in the namespace of the current catalog and
+     * database.
      *
      * @return names of all registered models
      */
@@ -1447,7 +1514,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     }
 
     /**
-     * Returns an array of names of all models registered in the namespace of the given catalog and
+     * Returns a set of names of all models registered in the namespace of the given catalog and
      * database.
      *
      * @return names of all registered models
@@ -1463,6 +1530,29 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
             throw new ValidationException(
                     String.format("Database %s does not exist", databaseName), e);
         }
+    }
+
+    /**
+     * Returns an array of names of temporary models registered in the namespace of the current
+     * catalog and database.
+     *
+     * @return names of registered temporary models
+     */
+    public Set<String> listTemporaryModels() {
+        return listTemporaryModelsInternal(getCurrentCatalog(), getCurrentDatabase())
+                .map(e -> e.getKey().getObjectName())
+                .collect(Collectors.toSet());
+    }
+
+    private Stream<Map.Entry<ObjectIdentifier, CatalogModel>> listTemporaryModelsInternal(
+            String catalogName, String databaseName) {
+        return temporaryModels.entrySet().stream()
+                .filter(
+                        e -> {
+                            ObjectIdentifier identifier = e.getKey();
+                            return identifier.getCatalogName().equals(catalogName)
+                                    && identifier.getDatabaseName().equals(databaseName);
+                        });
     }
 
     /**
@@ -1545,18 +1635,50 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     /**
      * Alters a model in a given fully qualified path.
      *
-     * @param modelChange The model containing only changes
+     * @param newModel The new model containing changes.
+     * @param modelChanges The changes to apply to the model.
      * @param objectIdentifier The fully qualified path where to alter the model.
      * @param ignoreIfNotExists If false exception will be thrown if the model to be altered does
      *     not exist.
      */
     public void alterModel(
-            CatalogModel modelChange,
+            CatalogModel newModel,
+            List<ModelChange> modelChanges,
             ObjectIdentifier objectIdentifier,
             boolean ignoreIfNotExists) {
         execute(
                 (catalog, path) -> {
-                    ResolvedCatalogModel resolvedModel = resolveCatalogModel(modelChange);
+                    ResolvedCatalogModel resolvedModel = resolveCatalogModel(newModel);
+                    catalog.alterModel(path, resolvedModel, modelChanges, ignoreIfNotExists);
+                    catalogModificationListeners.forEach(
+                            listener ->
+                                    listener.onEvent(
+                                            AlterModelEvent.createEvent(
+                                                    CatalogContext.createContext(
+                                                            objectIdentifier.getCatalogName(),
+                                                            catalog),
+                                                    objectIdentifier,
+                                                    resolvedModel,
+                                                    ignoreIfNotExists)));
+                },
+                objectIdentifier,
+                ignoreIfNotExists,
+                "AlterModel");
+    }
+
+    /**
+     * Alters a model in a given fully qualified path.
+     *
+     * @param newModel The new model containing changes
+     * @param objectIdentifier The fully qualified path where to alter the model.
+     * @param ignoreIfNotExists If false exception will be thrown if the model to be altered does
+     *     not exist.
+     */
+    public void alterModel(
+            CatalogModel newModel, ObjectIdentifier objectIdentifier, boolean ignoreIfNotExists) {
+        execute(
+                (catalog, path) -> {
+                    ResolvedCatalogModel resolvedModel = resolveCatalogModel(newModel);
                     catalog.alterModel(path, resolvedModel, ignoreIfNotExists);
                     catalogModificationListeners.forEach(
                             listener ->
@@ -1581,11 +1703,11 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
      * @param ignoreIfNotExists If false exception will be thrown if the model to drop does not
      *     exist.
      */
-    public void dropModel(ObjectIdentifier objectIdentifier, boolean ignoreIfNotExists) {
-        execute(
-                (catalog, path) -> {
-                    Optional<ContextResolvedModel> resultOpt = getModel(objectIdentifier);
-                    if (resultOpt.isPresent()) {
+    public boolean dropModel(ObjectIdentifier objectIdentifier, boolean ignoreIfNotExists) {
+        Optional<ContextResolvedModel> resultOpt = getModel(objectIdentifier);
+        if (resultOpt.isPresent()) {
+            execute(
+                    (catalog, path) -> {
                         ResolvedCatalogModel resolvedModel = resultOpt.get().getResolvedModel();
                         catalog.dropModel(path, ignoreIfNotExists);
                         catalogModificationListeners.forEach(
@@ -1599,14 +1721,18 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                                         resolvedModel,
                                                         ignoreIfNotExists,
                                                         false)));
-                    } else if (!ignoreIfNotExists) {
-                        throw new ModelNotExistException(
-                                objectIdentifier.getCatalogName(), objectIdentifier.toObjectPath());
-                    }
-                },
-                objectIdentifier,
-                ignoreIfNotExists,
-                "DropModel");
+                    },
+                    objectIdentifier,
+                    ignoreIfNotExists,
+                    "DropModel");
+            return true;
+        } else if (!ignoreIfNotExists) {
+            throw new ValidationException(
+                    String.format(
+                            "Model with identifier '%s' does not exist.",
+                            objectIdentifier.asSummaryString()));
+        }
+        return false;
     }
 
     /**
@@ -1673,6 +1799,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 command.execute(catalog.get(), objectIdentifier.toObjectPath());
             } catch (TableAlreadyExistException
                     | TableNotExistException
+                    | ModelNotExistException
+                    | ModelAlreadyExistException
                     | DatabaseNotExistException e) {
                 throw new ValidationException(getErrorMessage(objectIdentifier, commandName), e);
             } catch (Exception e) {
@@ -1780,6 +1908,11 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
         final ResolvedSchema resolvedSchema = table.getUnresolvedSchema().resolve(schemaResolver);
 
+        final MaterializedTableEnrichmentResult enrichmentResult =
+                this.materializedTableEnricher.enrich(table);
+        IntervalFreshness freshness = enrichmentResult.getFreshness();
+        RefreshMode resolvedRefreshMode = enrichmentResult.getRefreshMode();
+
         // Validate partition keys are included in physical columns
         final List<String> physicalColumns =
                 resolvedSchema.getColumns().stream()
@@ -1799,7 +1932,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                             }
                         });
 
-        return new ResolvedCatalogMaterializedTable(table, resolvedSchema);
+        return new ResolvedCatalogMaterializedTable(
+                table, resolvedSchema, resolvedRefreshMode, freshness);
     }
 
     /** Resolves a {@link CatalogView} to a validated {@link ResolvedCatalogView}. */
@@ -1808,8 +1942,54 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         if (view instanceof ResolvedCatalogView) {
             return (ResolvedCatalogView) view;
         }
+
+        if (view instanceof QueryOperationCatalogView) {
+            final QueryOperation queryOperation =
+                    ((QueryOperationCatalogView) view).getQueryOperation();
+            return new ResolvedCatalogView(view, queryOperation.getResolvedSchema());
+        }
+
         final ResolvedSchema resolvedSchema = view.getUnresolvedSchema().resolve(schemaResolver);
-        return new ResolvedCatalogView(view, resolvedSchema);
+        final List<Operation> parse;
+        try {
+            parse = parser.parse(view.getExpandedQuery());
+        } catch (Throwable e) {
+            // in case of a failure during parsing, let the lower layers fail
+            return new ResolvedCatalogView(view, resolvedSchema);
+        }
+        if (parse.size() != 1 || !(parse.get(0) instanceof QueryOperation)) {
+            // parsing a view should result in a single query operation
+            // if it is not what we expect, we let the lower layers fail
+            return new ResolvedCatalogView(view, resolvedSchema);
+        } else {
+            final QueryOperation operation = (QueryOperation) parse.get(0);
+            final ResolvedSchema querySchema = operation.getResolvedSchema();
+            if (querySchema.getColumns().size() != resolvedSchema.getColumns().size()) {
+                // in case the query does not match the number of expected columns, let the lower
+                // layers fail
+                return new ResolvedCatalogView(view, resolvedSchema);
+            }
+            final ResolvedSchema renamedQuerySchema =
+                    new ResolvedSchema(
+                            IntStream.range(0, resolvedSchema.getColumnCount())
+                                    .mapToObj(
+                                            i ->
+                                                    querySchema
+                                                            .getColumn(i)
+                                                            .get()
+                                                            .rename(
+                                                                    resolvedSchema
+                                                                            .getColumnNames()
+                                                                            .get(i)))
+                                    .collect(Collectors.toList()),
+                            resolvedSchema.getWatermarkSpecs(),
+                            resolvedSchema.getPrimaryKey().orElse(null),
+                            resolvedSchema.getIndexes());
+            return new ResolvedCatalogView(
+                    // pass a view that has the query parsed and
+                    // validated already
+                    new QueryOperationCatalogView(operation, view), renamedQuerySchema);
+        }
     }
 
     /**

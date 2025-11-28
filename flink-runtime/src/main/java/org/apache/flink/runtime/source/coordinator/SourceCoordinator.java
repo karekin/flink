@@ -113,6 +113,9 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     /** The Source that is associated with this SourceCoordinator. */
     private final Source<?, SplitT, EnumChkT> source;
 
+    /** The serializer that handles the serde of the split. */
+    private final SimpleVersionedSerializer<SplitT> splitSerializer;
+
     /** The serializer that handles the serde of the SplitEnumerator checkpoints. */
     private final SimpleVersionedSerializer<EnumChkT> enumCheckpointSerializer;
 
@@ -163,6 +166,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         this.operatorName = operatorName;
         this.source = source;
         this.enumCheckpointSerializer = source.getEnumeratorCheckpointSerializer();
+        this.splitSerializer = source.getSplitSerializer();
         this.context = context;
         this.coordinatorStore = coordinatorStore;
         this.watermarkAlignmentParams = watermarkAlignmentParams;
@@ -218,15 +222,12 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                 operatorName);
 
         for (Integer subtaskId : subTaskIds) {
-            // when subtask have been finished, do not send event.
-            if (!context.hasNoMoreSplits(subtaskId)) {
-                // Subtask maybe during deploying or restarting, so we only send
-                // WatermarkAlignmentEvent to ready task to avoid period task fail
-                // (Java-ThreadPoolExecutor will not schedule the period task if it throws an
-                // exception).
-                context.sendEventToSourceOperatorIfTaskReady(
-                        subtaskId, new WatermarkAlignmentEvent(maxAllowedWatermark));
-            }
+            // Subtask maybe during deploying or restarting, so we only send
+            // WatermarkAlignmentEvent to ready task to avoid period task fail
+            // (Java-ThreadPoolExecutor will not schedule the period task if it throws an
+            // exception).
+            context.sendEventToSourceOperatorIfTaskReady(
+                    subtaskId, new WatermarkAlignmentEvent(maxAllowedWatermark));
         }
     }
 
@@ -430,7 +431,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                                 // assignments
                                 byte[] assignmentData =
                                         context.getAssignmentTracker()
-                                                .snapshotState(source.getSplitSerializer());
+                                                .snapshotState(splitSerializer);
                                 out.writeInt(assignmentData.length);
                                 out.write(assignmentData);
 
@@ -683,7 +684,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     }
 
     private void handleReaderRegistrationEvent(
-            int subtask, int attemptNumber, ReaderRegistrationEvent event) {
+            int subtask, int attemptNumber, ReaderRegistrationEvent event) throws Exception {
         checkArgument(subtask == event.subtaskId());
 
         LOG.info(
@@ -695,7 +696,8 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
 
         final boolean subtaskReaderExisted =
                 context.registeredReadersOfAttempts().containsKey(subtask);
-        context.registerSourceReader(subtask, attemptNumber, event.location());
+        context.registerSourceReader(
+                subtask, attemptNumber, event.location(), event.splits(splitSerializer));
         if (!subtaskReaderExisted) {
             enumerator.addReader(event.subtaskId());
 

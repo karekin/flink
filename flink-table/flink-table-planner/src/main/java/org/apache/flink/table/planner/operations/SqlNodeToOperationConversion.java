@@ -21,23 +21,10 @@ package org.apache.flink.table.planner.operations;
 import org.apache.flink.sql.parser.ddl.SqlAddJar;
 import org.apache.flink.sql.parser.ddl.SqlAlterDatabase;
 import org.apache.flink.sql.parser.ddl.SqlAlterFunction;
-import org.apache.flink.sql.parser.ddl.SqlAlterTable;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableCompact;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableDropColumn;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableDropConstraint;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableDropDistribution;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableDropPrimaryKey;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableDropWatermark;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableOptions;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableRename;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableRenameColumn;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableReset;
-import org.apache.flink.sql.parser.ddl.SqlAlterTableSchema;
 import org.apache.flink.sql.parser.ddl.SqlAnalyzeTable;
 import org.apache.flink.sql.parser.ddl.SqlCompilePlan;
 import org.apache.flink.sql.parser.ddl.SqlCreateDatabase;
 import org.apache.flink.sql.parser.ddl.SqlCreateFunction;
-import org.apache.flink.sql.parser.ddl.SqlCreateTable;
 import org.apache.flink.sql.parser.ddl.SqlCreateTableAs;
 import org.apache.flink.sql.parser.ddl.SqlDropCatalog;
 import org.apache.flink.sql.parser.ddl.SqlDropDatabase;
@@ -49,7 +36,6 @@ import org.apache.flink.sql.parser.ddl.SqlReplaceTableAs;
 import org.apache.flink.sql.parser.ddl.SqlReset;
 import org.apache.flink.sql.parser.ddl.SqlSet;
 import org.apache.flink.sql.parser.ddl.SqlStopJob;
-import org.apache.flink.sql.parser.ddl.SqlTableOption;
 import org.apache.flink.sql.parser.ddl.SqlUseCatalog;
 import org.apache.flink.sql.parser.ddl.SqlUseDatabase;
 import org.apache.flink.sql.parser.ddl.SqlUseModules;
@@ -66,6 +52,7 @@ import org.apache.flink.sql.parser.dql.SqlLoadModule;
 import org.apache.flink.sql.parser.dql.SqlRichDescribeTable;
 import org.apache.flink.sql.parser.dql.SqlRichExplain;
 import org.apache.flink.sql.parser.dql.SqlShowColumns;
+import org.apache.flink.sql.parser.dql.SqlShowCreateMaterializedTable;
 import org.apache.flink.sql.parser.dql.SqlShowCreateTable;
 import org.apache.flink.sql.parser.dql.SqlShowCreateView;
 import org.apache.flink.sql.parser.dql.SqlShowCurrentCatalog;
@@ -79,24 +66,19 @@ import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogBaseTable;
+import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
 import org.apache.flink.table.catalog.CatalogDatabase;
 import org.apache.flink.table.catalog.CatalogDatabaseImpl;
 import org.apache.flink.table.catalog.CatalogFunction;
 import org.apache.flink.table.catalog.CatalogFunctionImpl;
 import org.apache.flink.table.catalog.CatalogManager;
-import org.apache.flink.table.catalog.CatalogPartition;
-import org.apache.flink.table.catalog.CatalogPartitionImpl;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
 import org.apache.flink.table.catalog.CatalogTable;
-import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.FunctionLanguage;
-import org.apache.flink.table.catalog.ManagedTableListener;
 import org.apache.flink.table.catalog.ObjectIdentifier;
-import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
-import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
@@ -109,7 +91,6 @@ import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
-import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionIdentifier;
 import org.apache.flink.table.operations.BeginStatementSetOperation;
@@ -121,17 +102,15 @@ import org.apache.flink.table.operations.ExplainOperation;
 import org.apache.flink.table.operations.LoadModuleOperation;
 import org.apache.flink.table.operations.ModifyOperation;
 import org.apache.flink.table.operations.ModifyType;
-import org.apache.flink.table.operations.NopOperation;
 import org.apache.flink.table.operations.Operation;
-import org.apache.flink.table.operations.QueryOperation;
 import org.apache.flink.table.operations.ShowColumnsOperation;
+import org.apache.flink.table.operations.ShowCreateMaterializedTableOperation;
 import org.apache.flink.table.operations.ShowCreateTableOperation;
 import org.apache.flink.table.operations.ShowCreateViewOperation;
 import org.apache.flink.table.operations.ShowCurrentCatalogOperation;
 import org.apache.flink.table.operations.ShowCurrentDatabaseOperation;
 import org.apache.flink.table.operations.ShowModulesOperation;
 import org.apache.flink.table.operations.SinkModifyOperation;
-import org.apache.flink.table.operations.SourceQueryOperation;
 import org.apache.flink.table.operations.StatementSetOperation;
 import org.apache.flink.table.operations.UnloadModuleOperation;
 import org.apache.flink.table.operations.UseCatalogOperation;
@@ -147,9 +126,6 @@ import org.apache.flink.table.operations.command.ShowJobsOperation;
 import org.apache.flink.table.operations.command.StopJobOperation;
 import org.apache.flink.table.operations.ddl.AlterCatalogFunctionOperation;
 import org.apache.flink.table.operations.ddl.AlterDatabaseOperation;
-import org.apache.flink.table.operations.ddl.AlterPartitionPropertiesOperation;
-import org.apache.flink.table.operations.ddl.AlterTableChangeOperation;
-import org.apache.flink.table.operations.ddl.AlterTableRenameOperation;
 import org.apache.flink.table.operations.ddl.AnalyzeTableOperation;
 import org.apache.flink.table.operations.ddl.CompilePlanOperation;
 import org.apache.flink.table.operations.ddl.CreateCatalogFunctionOperation;
@@ -163,6 +139,7 @@ import org.apache.flink.table.operations.ddl.DropTempSystemFunctionOperation;
 import org.apache.flink.table.operations.ddl.DropViewOperation;
 import org.apache.flink.table.operations.utils.LikeType;
 import org.apache.flink.table.operations.utils.ShowLikeOperator;
+import org.apache.flink.table.operations.utils.ValidationUtils;
 import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 import org.apache.flink.table.planner.hint.FlinkHints;
 import org.apache.flink.table.planner.operations.converters.SqlNodeConverters;
@@ -179,16 +156,12 @@ import org.apache.calcite.rel.hint.HintStrategyTable;
 import org.apache.calcite.rel.hint.RelHint;
 import org.apache.calcite.rel.logical.LogicalTableModify;
 import org.apache.calcite.sql.SqlDelete;
-import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.SqlUtil;
-import org.apache.calcite.sql.dialect.CalciteSqlDialect;
-import org.apache.calcite.sql.parser.SqlParser;
-import org.apache.calcite.util.NlsString;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -206,7 +179,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -222,8 +194,6 @@ import java.util.stream.Collectors;
 public class SqlNodeToOperationConversion {
     private final FlinkPlannerImpl flinkPlanner;
     private final CatalogManager catalogManager;
-    private final SqlCreateTableConverter createTableConverter;
-    private final AlterSchemaConverter alterSchemaConverter;
 
     // ~ Constructors -----------------------------------------------------------
 
@@ -231,21 +201,11 @@ public class SqlNodeToOperationConversion {
             FlinkPlannerImpl flinkPlanner, CatalogManager catalogManager) {
         this.flinkPlanner = flinkPlanner;
         this.catalogManager = catalogManager;
-        this.createTableConverter =
-                new SqlCreateTableConverter(
-                        flinkPlanner.getOrCreateSqlValidator(),
-                        catalogManager,
-                        this::getQuotedSqlString);
-        this.alterSchemaConverter =
-                new AlterSchemaConverter(
-                        flinkPlanner.getOrCreateSqlValidator(),
-                        this::getQuotedSqlString,
-                        catalogManager);
     }
 
     /**
      * This is the main entrance for executing all kinds of DDL/DML {@code SqlNode}s, different
-     * SqlNode will have it's implementation in the #convert(type) method whose 'type' argument is
+     * SqlNode will have its implementation in the #convert(type) method whose 'type' argument is
      * subclass of {@code SqlNode}.
      *
      * @param flinkPlanner FlinkPlannerImpl to convertCreateTable sql node to rel node
@@ -300,18 +260,8 @@ public class SqlNodeToOperationConversion {
                     converter.convertShowCurrentDatabase((SqlShowCurrentDatabase) validated));
         } else if (validated instanceof SqlUseDatabase) {
             return Optional.of(converter.convertUseDatabase((SqlUseDatabase) validated));
-        } else if (validated instanceof SqlCreateTable) {
-            if (validated instanceof SqlCreateTableAs) {
-                return Optional.of(
-                        converter.createTableConverter.convertCreateTableAS(
-                                flinkPlanner, (SqlCreateTableAs) validated));
-            }
-            return Optional.of(
-                    converter.createTableConverter.convertCreateTable((SqlCreateTable) validated));
         } else if (validated instanceof SqlDropTable) {
             return Optional.of(converter.convertDropTable((SqlDropTable) validated));
-        } else if (validated instanceof SqlAlterTable) {
-            return Optional.of(converter.convertAlterTable((SqlAlterTable) validated));
         } else if (validated instanceof SqlShowColumns) {
             return Optional.of(converter.convertShowColumns((SqlShowColumns) validated));
         } else if (validated instanceof SqlDropView) {
@@ -324,6 +274,10 @@ public class SqlNodeToOperationConversion {
             return Optional.of(converter.convertAlterFunction((SqlAlterFunction) validated));
         } else if (validated instanceof SqlShowCreateTable) {
             return Optional.of(converter.convertShowCreateTable((SqlShowCreateTable) validated));
+        } else if (validated instanceof SqlShowCreateMaterializedTable) {
+            return Optional.of(
+                    converter.convertShowCreateMaterializedTable(
+                            (SqlShowCreateMaterializedTable) validated));
         } else if (validated instanceof SqlShowCreateView) {
             return Optional.of(converter.convertShowCreateView((SqlShowCreateView) validated));
         } else if (validated instanceof SqlRichExplain) {
@@ -394,246 +348,35 @@ public class SqlNodeToOperationConversion {
     /** Convert DROP TABLE statement. */
     private Operation convertDropTable(SqlDropTable sqlDropTable) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlDropTable.fullTableName());
+                UnresolvedIdentifier.of(sqlDropTable.getFullName());
         ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
 
         return new DropTableOperation(
                 identifier, sqlDropTable.getIfExists(), sqlDropTable.isTemporary());
     }
 
-    /** convert ALTER TABLE statement. */
-    private Operation convertAlterTable(SqlAlterTable sqlAlterTable) {
-        UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlAlterTable.fullTableName());
-        ObjectIdentifier tableIdentifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
-        Optional<ContextResolvedTable> optionalCatalogTable =
-                catalogManager.getTable(tableIdentifier);
-        if (!optionalCatalogTable.isPresent() || optionalCatalogTable.get().isTemporary()) {
-            if (sqlAlterTable.ifTableExists()) {
-                return new NopOperation();
-            }
-            throw new ValidationException(
-                    String.format(
-                            "Table %s doesn't exist or is a temporary table.", tableIdentifier));
-        }
-        CatalogBaseTable baseTable = optionalCatalogTable.get().getResolvedTable();
-        if (baseTable instanceof CatalogView) {
-            throw new ValidationException("ALTER TABLE for a view is not allowed");
-        }
-        ResolvedCatalogTable resolvedCatalogTable = (ResolvedCatalogTable) baseTable;
-        if (sqlAlterTable instanceof SqlAlterTableRename) {
-            UnresolvedIdentifier newUnresolvedIdentifier =
-                    UnresolvedIdentifier.of(
-                            ((SqlAlterTableRename) sqlAlterTable).fullNewTableName());
-            ObjectIdentifier newTableIdentifier =
-                    catalogManager.qualifyIdentifier(newUnresolvedIdentifier);
-            return new AlterTableRenameOperation(
-                    tableIdentifier, newTableIdentifier, sqlAlterTable.ifTableExists());
-        } else if (sqlAlterTable instanceof SqlAlterTableOptions) {
-            return convertAlterTableOptions(
-                    tableIdentifier,
-                    (CatalogTable) baseTable,
-                    (SqlAlterTableOptions) sqlAlterTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableReset) {
-            return convertAlterTableReset(
-                    tableIdentifier, (CatalogTable) baseTable, (SqlAlterTableReset) sqlAlterTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableDropColumn) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableDropColumn) sqlAlterTable, resolvedCatalogTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableDropDistribution) {
-            return convertAlterTableDropDistribution(
-                    sqlAlterTable, resolvedCatalogTable, tableIdentifier);
-        } else if (sqlAlterTable instanceof SqlAlterTableDropPrimaryKey) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableDropPrimaryKey) sqlAlterTable, resolvedCatalogTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableDropConstraint) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableDropConstraint) sqlAlterTable, resolvedCatalogTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableDropWatermark) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableDropWatermark) sqlAlterTable, resolvedCatalogTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableRenameColumn) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableRenameColumn) sqlAlterTable, resolvedCatalogTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableCompact) {
-            return convertAlterTableCompact(
-                    tableIdentifier,
-                    optionalCatalogTable.get(),
-                    (SqlAlterTableCompact) sqlAlterTable);
-        } else if (sqlAlterTable instanceof SqlAlterTableSchema) {
-            return alterSchemaConverter.convertAlterSchema(
-                    (SqlAlterTableSchema) sqlAlterTable, resolvedCatalogTable);
-        } else {
-            throw new ValidationException(
-                    String.format(
-                            "[%s] needs to implement",
-                            sqlAlterTable.toSqlString(CalciteSqlDialect.DEFAULT)));
-        }
-    }
-
-    private Operation convertAlterTableOptions(
-            ObjectIdentifier tableIdentifier,
-            CatalogTable oldTable,
-            SqlAlterTableOptions alterTableOptions) {
-        LinkedHashMap<String, String> partitionKVs = alterTableOptions.getPartitionKVs();
-        // it's altering partitions
-        if (partitionKVs != null) {
-            CatalogPartitionSpec partitionSpec = new CatalogPartitionSpec(partitionKVs);
-            CatalogPartition catalogPartition =
-                    catalogManager
-                            .getPartition(tableIdentifier, partitionSpec)
-                            .orElseThrow(
-                                    () ->
-                                            new ValidationException(
-                                                    String.format(
-                                                            "Partition %s of table %s doesn't exist",
-                                                            partitionSpec.getPartitionSpec(),
-                                                            tableIdentifier)));
-            Map<String, String> newProps = new HashMap<>(catalogPartition.getProperties());
-            newProps.putAll(
-                    OperationConverterUtils.extractProperties(alterTableOptions.getPropertyList()));
-            return new AlterPartitionPropertiesOperation(
-                    tableIdentifier,
-                    partitionSpec,
-                    new CatalogPartitionImpl(newProps, catalogPartition.getComment()));
-        } else {
-            // it's altering a table
-            Map<String, String> changeOptions =
-                    OperationConverterUtils.extractProperties(alterTableOptions.getPropertyList());
-            Map<String, String> newOptions = new HashMap<>(oldTable.getOptions());
-            newOptions.putAll(changeOptions);
-            return new AlterTableChangeOperation(
-                    tableIdentifier,
-                    changeOptions.entrySet().stream()
-                            .map(entry -> TableChange.set(entry.getKey(), entry.getValue()))
-                            .collect(Collectors.toList()),
-                    oldTable.copy(newOptions),
-                    alterTableOptions.ifTableExists());
-        }
-    }
-
-    private Operation convertAlterTableReset(
-            ObjectIdentifier tableIdentifier,
-            CatalogTable oldTable,
-            SqlAlterTableReset alterTableReset) {
-        Map<String, String> newOptions = new HashMap<>(oldTable.getOptions());
-        // reset empty or 'connector' key is not allowed
-        Set<String> resetKeys = alterTableReset.getResetKeys();
-        if (resetKeys.isEmpty() || resetKeys.contains(FactoryUtil.CONNECTOR.key())) {
-            String exMsg =
-                    resetKeys.isEmpty()
-                            ? "ALTER TABLE RESET does not support empty key"
-                            : "ALTER TABLE RESET does not support changing 'connector'";
-            throw new ValidationException(exMsg);
-        }
-        // reset table option keys
-        resetKeys.forEach(newOptions::remove);
-        return new AlterTableChangeOperation(
-                tableIdentifier,
-                resetKeys.stream().map(TableChange::reset).collect(Collectors.toList()),
-                oldTable.copy(newOptions),
-                alterTableReset.ifTableExists());
-    }
-
-    /**
-     * Convert `ALTER TABLE ... COMPACT` operation to {@link ModifyOperation} for Flink's managed
-     * table to trigger a compaction batch job.
-     */
-    private ModifyOperation convertAlterTableCompact(
-            ObjectIdentifier tableIdentifier,
-            ContextResolvedTable contextResolvedTable,
-            SqlAlterTableCompact alterTableCompact) {
-        Catalog catalog = catalogManager.getCatalog(tableIdentifier.getCatalogName()).orElse(null);
-        ResolvedCatalogTable resolvedCatalogTable = contextResolvedTable.getResolvedTable();
-
-        if (ManagedTableListener.isManagedTable(catalog, resolvedCatalogTable)) {
-            Map<String, String> partitionKVs = alterTableCompact.getPartitionKVs();
-            CatalogPartitionSpec partitionSpec = new CatalogPartitionSpec(Collections.emptyMap());
-            if (partitionKVs != null) {
-                List<String> partitionKeys = resolvedCatalogTable.getPartitionKeys();
-                Set<String> validPartitionKeySet = new HashSet<>(partitionKeys);
-                String exMsg =
-                        partitionKeys.isEmpty()
-                                ? String.format("Table %s is not partitioned.", tableIdentifier)
-                                : String.format(
-                                        "Available ordered partition columns: [%s]",
-                                        partitionKeys.stream()
-                                                .collect(Collectors.joining("', '", "'", "'")));
-                partitionKVs.forEach(
-                        (partitionKey, partitionValue) -> {
-                            if (!validPartitionKeySet.contains(partitionKey)) {
-                                throw new ValidationException(
-                                        String.format(
-                                                "Partition column '%s' not defined in the table schema. %s",
-                                                partitionKey, exMsg));
-                            }
-                        });
-                partitionSpec = new CatalogPartitionSpec(partitionKVs);
-            }
-            Map<String, String> compactOptions =
-                    catalogManager.resolveCompactManagedTableOptions(
-                            resolvedCatalogTable, tableIdentifier, partitionSpec);
-            QueryOperation child = new SourceQueryOperation(contextResolvedTable, compactOptions);
-            return new SinkModifyOperation(
-                    contextResolvedTable,
-                    child,
-                    partitionSpec.getPartitionSpec(),
-                    null, // targetColumns
-                    false,
-                    compactOptions);
-        }
-        throw new ValidationException(
-                String.format(
-                        "ALTER TABLE COMPACT operation is not supported for non-managed table %s",
-                        tableIdentifier));
-    }
-
-    /** Convert ALTER TABLE DROP DISTRIBUTION statement. */
-    private static AlterTableChangeOperation convertAlterTableDropDistribution(
-            SqlAlterTable sqlAlterTable,
-            ResolvedCatalogTable resolvedCatalogTable,
-            ObjectIdentifier tableIdentifier) {
-        if (!resolvedCatalogTable.getDistribution().isPresent()) {
-            throw new ValidationException(
-                    String.format(
-                            "Table %s does not have a distribution to drop.", tableIdentifier));
-        }
-
-        List<TableChange> tableChanges = Collections.singletonList(TableChange.dropDistribution());
-        CatalogTable.Builder builder =
-                CatalogTable.newBuilder()
-                        .comment(resolvedCatalogTable.getComment())
-                        .options(resolvedCatalogTable.getOptions())
-                        .schema(resolvedCatalogTable.getUnresolvedSchema())
-                        .partitionKeys(resolvedCatalogTable.getPartitionKeys())
-                        .options(resolvedCatalogTable.getOptions());
-
-        resolvedCatalogTable.getSnapshot().ifPresent(builder::snapshot);
-
-        CatalogTable newTable = builder.build();
-        return new AlterTableChangeOperation(
-                tableIdentifier, tableChanges, newTable, sqlAlterTable.ifTableExists());
-    }
-
     /** Convert CREATE FUNCTION statement. */
     private Operation convertCreateFunction(SqlCreateFunction sqlCreateFunction) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlCreateFunction.getFunctionIdentifier());
+                UnresolvedIdentifier.of(sqlCreateFunction.getFullName());
         List<ResourceUri> resourceUris = getFunctionResources(sqlCreateFunction.getResourceInfos());
+        final Map<String, String> options = sqlCreateFunction.getProperties();
         if (sqlCreateFunction.isSystemFunction()) {
             return new CreateTempSystemFunctionOperation(
                     unresolvedIdentifier.getObjectName(),
                     sqlCreateFunction.getFunctionClassName().getValueAs(String.class),
                     sqlCreateFunction.isIfNotExists(),
                     parseLanguage(sqlCreateFunction.getFunctionLanguage()),
-                    resourceUris);
+                    resourceUris,
+                    options);
         } else {
             FunctionLanguage language = parseLanguage(sqlCreateFunction.getFunctionLanguage());
             CatalogFunction catalogFunction =
                     new CatalogFunctionImpl(
                             sqlCreateFunction.getFunctionClassName().getValueAs(String.class),
                             language,
-                            resourceUris);
+                            resourceUris,
+                            options);
             ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
 
             return new CreateCatalogFunctionOperation(
@@ -688,7 +431,7 @@ public class SqlNodeToOperationConversion {
                         sqlAlterFunction.getFunctionClassName().getValueAs(String.class), language);
 
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlAlterFunction.getFunctionIdentifier());
+                UnresolvedIdentifier.of(sqlAlterFunction.getFullName());
         ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
         return new AlterCatalogFunctionOperation(
                 identifier,
@@ -700,7 +443,7 @@ public class SqlNodeToOperationConversion {
     /** Convert DROP FUNCTION statement. */
     private Operation convertDropFunction(SqlDropFunction sqlDropFunction) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlDropFunction.getFunctionIdentifier());
+                UnresolvedIdentifier.of(sqlDropFunction.getFullName());
         if (sqlDropFunction.isSystemFunction()) {
             return new DropTempSystemFunctionOperation(
                     unresolvedIdentifier.getObjectName(), sqlDropFunction.getIfExists());
@@ -817,7 +560,7 @@ public class SqlNodeToOperationConversion {
 
     /** Convert CREATE DATABASE statement. */
     private Operation convertCreateDatabase(SqlCreateDatabase sqlCreateDatabase) {
-        String[] fullDatabaseName = sqlCreateDatabase.fullDatabaseName();
+        String[] fullDatabaseName = sqlCreateDatabase.getFullName();
         if (fullDatabaseName.length > 2) {
             throw new ValidationException("create database identifier format error");
         }
@@ -828,21 +571,9 @@ public class SqlNodeToOperationConversion {
         String databaseName =
                 (fullDatabaseName.length == 1) ? fullDatabaseName[0] : fullDatabaseName[1];
         boolean ignoreIfExists = sqlCreateDatabase.isIfNotExists();
-        String databaseComment =
-                sqlCreateDatabase
-                        .getComment()
-                        .map(comment -> comment.getValueAs(NlsString.class).getValue())
-                        .orElse(null);
+        String databaseComment = sqlCreateDatabase.getComment();
         // set with properties
-        Map<String, String> properties = new HashMap<>();
-        sqlCreateDatabase
-                .getPropertyList()
-                .getList()
-                .forEach(
-                        p ->
-                                properties.put(
-                                        ((SqlTableOption) p).getKeyString(),
-                                        ((SqlTableOption) p).getValueString()));
+        final Map<String, String> properties = sqlCreateDatabase.getProperties();
         CatalogDatabase catalogDatabase = new CatalogDatabaseImpl(properties, databaseComment);
         return new CreateDatabaseOperation(
                 catalogName, databaseName, catalogDatabase, ignoreIfExists);
@@ -850,7 +581,7 @@ public class SqlNodeToOperationConversion {
 
     /** Convert DROP DATABASE statement. */
     private Operation convertDropDatabase(SqlDropDatabase sqlDropDatabase) {
-        String[] fullDatabaseName = sqlDropDatabase.fullDatabaseName();
+        String[] fullDatabaseName = sqlDropDatabase.getFullName();
         if (fullDatabaseName.length > 2) {
             throw new ValidationException("drop database identifier format error");
         }
@@ -869,7 +600,7 @@ public class SqlNodeToOperationConversion {
 
     /** Convert ALTER DATABASE statement. */
     private Operation convertAlterDatabase(SqlAlterDatabase sqlAlterDatabase) {
-        String[] fullDatabaseName = sqlAlterDatabase.fullDatabaseName();
+        String[] fullDatabaseName = sqlAlterDatabase.getFullName();
         if (fullDatabaseName.length > 2) {
             throw new ValidationException("alter database identifier format error");
         }
@@ -894,14 +625,7 @@ public class SqlNodeToOperationConversion {
             throw new ValidationException(String.format("Catalog %s not exists", catalogName));
         }
         // set with properties
-        sqlAlterDatabase
-                .getPropertyList()
-                .getList()
-                .forEach(
-                        p ->
-                                properties.put(
-                                        ((SqlTableOption) p).getKeyString(),
-                                        ((SqlTableOption) p).getValueString()));
+        properties.putAll(sqlAlterDatabase.getProperties());
         CatalogDatabase catalogDatabase =
                 new CatalogDatabaseImpl(properties, originCatalogDatabase.getComment());
         return new AlterDatabaseOperation(catalogName, databaseName, catalogDatabase);
@@ -937,6 +661,16 @@ public class SqlNodeToOperationConversion {
         return new ShowCreateTableOperation(identifier);
     }
 
+    /** Convert SHOW CREATE MATERIALIZED TABLE statement. */
+    private Operation convertShowCreateMaterializedTable(
+            SqlShowCreateMaterializedTable sqlShowCreateMaterializedTable) {
+        UnresolvedIdentifier unresolvedIdentifier =
+                UnresolvedIdentifier.of(
+                        sqlShowCreateMaterializedTable.getFullMaterializedTableName());
+        ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
+        return new ShowCreateMaterializedTableOperation(identifier);
+    }
+
     /** Convert SHOW CREATE VIEW statement. */
     private Operation convertShowCreateView(SqlShowCreateView sqlShowCreateView) {
         UnresolvedIdentifier unresolvedIdentifier =
@@ -948,7 +682,7 @@ public class SqlNodeToOperationConversion {
     /** Convert DROP VIEW statement. */
     private Operation convertDropView(SqlDropView sqlDropView) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlDropView.fullViewName());
+                UnresolvedIdentifier.of(sqlDropView.getFullName());
         ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
 
         return new DropViewOperation(
@@ -963,6 +697,21 @@ public class SqlNodeToOperationConversion {
             operation = convertSqlInsert((RichSqlInsert) sqlNode);
         } else if (sqlNode instanceof SqlStatementSet) {
             operation = convertSqlStatementSet((SqlStatementSet) sqlNode);
+        } else if (sqlNode instanceof SqlExecute) {
+            // Handle EXPLAIN EXECUTE STATEMENT SET by extracting the inner statement
+            SqlNode innerStatement = ((SqlExecute) sqlNode).getStatement();
+            if (innerStatement instanceof SqlStatementSet) {
+                operation = convertSqlStatementSet((SqlStatementSet) innerStatement);
+            } else if (innerStatement instanceof RichSqlInsert) {
+                operation = convertSqlInsert((RichSqlInsert) innerStatement);
+            } else if (innerStatement.getKind().belongsTo(SqlKind.QUERY)) {
+                operation = convertSqlQuery(innerStatement);
+            } else {
+                throw new ValidationException(
+                        String.format(
+                                "EXPLAIN EXECUTE statement doesn't support %s",
+                                innerStatement.getKind()));
+            }
         } else if (sqlNode.getKind().belongsTo(SqlKind.QUERY)) {
             operation = convertSqlQuery(sqlExplain.getStatement());
         } else if ((sqlNode instanceof SqlCreateTableAs)
@@ -994,11 +743,7 @@ public class SqlNodeToOperationConversion {
     /** Convert LOAD MODULE statement. */
     private Operation convertLoadModule(SqlLoadModule sqlLoadModule) {
         String moduleName = sqlLoadModule.moduleName();
-        Map<String, String> properties = new HashMap<>();
-        for (SqlNode node : sqlLoadModule.getPropertyList().getList()) {
-            SqlTableOption option = (SqlTableOption) node;
-            properties.put(option.getKeyString(), option.getValueString());
-        }
+        Map<String, String> properties = sqlLoadModule.getProperties();
         return new LoadModuleOperation(moduleName, properties);
     }
 
@@ -1082,9 +827,8 @@ public class SqlNodeToOperationConversion {
                             "Table %s doesn't exist or is a temporary table.", tableIdentifier));
         }
         CatalogBaseTable baseTable = optionalCatalogTable.get().getResolvedTable();
-        if (baseTable instanceof CatalogView) {
-            throw new ValidationException("ANALYZE TABLE for a view is not allowed.");
-        }
+        ValidationUtils.validateTableKind(baseTable, TableKind.TABLE, "analyze table");
+
         CatalogTable table = (CatalogTable) baseTable;
         ResolvedSchema schema =
                 baseTable.getUnresolvedSchema().resolve(catalogManager.getSchemaResolver());
@@ -1113,18 +857,18 @@ public class SqlNodeToOperationConversion {
                             tableIdentifier));
         }
 
-        String[] columns = analyzeTable.getColumnNames();
+        List<String> columns = analyzeTable.getColumnNames();
         List<Column> targetColumns;
         if (analyzeTable.isAllColumns()) {
-            Preconditions.checkArgument(columns.length == 0);
+            Preconditions.checkArgument(columns.isEmpty());
             // computed column and metadata column will be ignored
             targetColumns =
                     schema.getColumns().stream()
                             .filter(Column::isPhysical)
                             .collect(Collectors.toList());
-        } else if (columns.length > 0) {
+        } else if (!columns.isEmpty()) {
             targetColumns =
-                    Arrays.stream(columns)
+                    columns.stream()
                             .map(
                                     c -> {
                                         Optional<Column> colOpt = schema.getColumn(c);
@@ -1285,8 +1029,7 @@ public class SqlNodeToOperationConversion {
                         catalogManager.qualifyIdentifier(unresolvedTableIdentifier));
         // try push down delete
         Optional<DynamicTableSink> optionalDynamicTableSink =
-                DeletePushDownUtils.getDynamicTableSink(
-                        contextResolvedTable, tableModify, catalogManager);
+                DeletePushDownUtils.getDynamicTableSink(contextResolvedTable, tableModify);
         if (optionalDynamicTableSink.isPresent()) {
             DynamicTableSink dynamicTableSink = optionalDynamicTableSink.get();
             // if the table sink supports delete push down
@@ -1359,21 +1102,11 @@ public class SqlNodeToOperationConversion {
                 .toArray(int[][]::new);
     }
 
-    private String getQuotedSqlString(SqlNode sqlNode) {
-        SqlParser.Config parserConfig = flinkPlanner.config().getParserConfig();
-        SqlDialect dialect =
-                new CalciteSqlDialect(
-                        SqlDialect.EMPTY_CONTEXT
-                                .withQuotedCasing(parserConfig.unquotedCasing())
-                                .withConformance(parserConfig.conformance())
-                                .withUnquotedCasing(parserConfig.unquotedCasing())
-                                .withIdentifierQuoteString(parserConfig.quoting().string));
-        return sqlNode.toSqlString(dialect).getSql();
-    }
-
     private PlannerQueryOperation toQueryOperation(FlinkPlannerImpl planner, SqlNode validated) {
         // transform to a relational tree
         RelRoot relational = planner.rel(validated);
-        return new PlannerQueryOperation(relational.project(), () -> getQuotedSqlString(validated));
+        return new PlannerQueryOperation(
+                relational.project(),
+                () -> OperationConverterUtils.getQuotedSqlString(validated, planner));
     }
 }

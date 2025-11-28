@@ -22,6 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.attribute.Attribute;
 import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.api.common.functions.Function;
@@ -36,6 +37,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.typeutils.MissingTypeInfo;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.StateChangelogOptions;
@@ -75,7 +77,9 @@ import org.apache.flink.streaming.runtime.tasks.MultipleInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.OneInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask;
 import org.apache.flink.streaming.runtime.tasks.SourceStreamTask;
+import org.apache.flink.streaming.runtime.tasks.StreamTaskException;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTask;
+import org.apache.flink.streaming.runtime.watermark.AbstractInternalWatermarkDeclaration;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.OutputTag;
@@ -110,7 +114,7 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration.MINIMAL_CHECKPOINT_TIME;
-import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.streaming.util.watermark.WatermarkUtils.getInternalWatermarkDeclarationsFromStreamGraph;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -191,6 +195,10 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
 
     private final Map<Integer, ResourceSpec> streamNodeMinResources = new HashMap<>();
 
+    // Serialized watermark declarations of the StreamGraph, which may be null if no watermark is
+    // declared
+    private byte[] serializedWatermarkDeclarations;
+
     public StreamGraph(
             Configuration jobConfiguration,
             ExecutionConfig executionConfig,
@@ -241,24 +249,7 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
     }
 
     public CheckpointingMode getCheckpointingMode() {
-        return getCheckpointingMode(this.checkpointConfig);
-    }
-
-    public static CheckpointingMode getCheckpointingMode(CheckpointConfig checkpointConfig) {
-        CheckpointingMode checkpointingMode = checkpointConfig.getCheckpointingConsistencyMode();
-
-        checkArgument(
-                checkpointingMode == CheckpointingMode.EXACTLY_ONCE
-                        || checkpointingMode == CheckpointingMode.AT_LEAST_ONCE,
-                "Unexpected checkpointing mode.");
-
-        if (checkpointConfig.isCheckpointingEnabled()) {
-            return checkpointingMode;
-        } else {
-            // the "at-least-once" input handler is slightly cheaper (in the absence of
-            // checkpoints), so we use that one if checkpointing is not enabled
-            return CheckpointingMode.AT_LEAST_ONCE;
-        }
+        return this.checkpointConfig.getCheckpointingConsistencyMode();
     }
 
     /**
@@ -1089,6 +1080,14 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
         }
     }
 
+    public void setAdditionalMetricVariables(
+            Integer nodeId, Map<String, String> additionalMetricVariables) {
+        StreamNode node = streamNodes.get(nodeId);
+        if (node != null) {
+            node.setAdditionalMetricVariables(additionalMetricVariables);
+        }
+    }
+
     void setTransformationUserHash(Integer nodeId, String nodeHash) {
         StreamNode node = streamNodes.get(nodeId);
         if (node != null) {
@@ -1189,6 +1188,13 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
 
     public void setJobType(JobType jobType) {
         this.jobType = jobType;
+        if (jobType == JobType.STREAMING) {
+            jobConfiguration.set(ExecutionOptions.RUNTIME_MODE, RuntimeExecutionMode.STREAMING);
+        } else if (jobType == JobType.BATCH) {
+            jobConfiguration.set(ExecutionOptions.RUNTIME_MODE, RuntimeExecutionMode.BATCH);
+        } else {
+            throw new IllegalArgumentException("Unsupported job type: " + jobType);
+        }
     }
 
     @Override
@@ -1489,6 +1495,24 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
                 addNodesThatHaveNoNewPredecessors(v, target, remaining);
             }
         }
+    }
+
+    public void serializeAndSaveWatermarkDeclarations() {
+        Set<AbstractInternalWatermarkDeclaration<?>> watermarkDeclarations =
+                getInternalWatermarkDeclarationsFromStreamGraph(this);
+        if (!watermarkDeclarations.isEmpty()) {
+            try {
+                this.serializedWatermarkDeclarations =
+                        InstantiationUtil.serializeObject(watermarkDeclarations);
+            } catch (IOException e) {
+                throw new StreamTaskException("Could not serialize watermark declarations.", e);
+            }
+        }
+    }
+
+    /** Get serialized watermark declarations, note that it may be null. */
+    public byte[] getSerializedWatermarkDeclarations() {
+        return serializedWatermarkDeclarations;
     }
 
     @Override
